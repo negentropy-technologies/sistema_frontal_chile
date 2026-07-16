@@ -5,9 +5,6 @@ geemap          # timelapse/GIF export, timestamp overlays on frames
 # --- NASA Earthdata (EARTHDATA_USER, EARTHDATA_PASSWORD) — GPM IMERG, MODIS ---
 earthaccess
 
-# --- USGS EarthExplorer M2M API (M2M_USERNAME, M2M_PASSWORD) — Landsat ---
-landsatxplore
-
 # --- Postgres/PostGIS + Martin tile server (DATABASE_URL, DB_*, MARTIN_DB_*) ---
 psycopg2-binary
 sqlalchemy
@@ -15,6 +12,7 @@ geoalchemy2
 
 # --- SSH tunnel to remote DB (SSH_HOST, SSH_KEY_PATH, SSH_REMOTE_DB_PORT) ---
 sshtunnel
+paramiko<3.0  # sshtunnel 0.4.0 (latest) still references paramiko.DSSKey, removed in paramiko>=3
 
 # --- Hugging Face (HF_TOKEN) ---
 huggingface_hub

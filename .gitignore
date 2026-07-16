@@ -1,8 +1,29 @@
+# --- Entorno virtual de Python ---
 .venv/
-.env
-.claude/
-out/
+
+# --- Cache y bytecode de Python ---
 __pycache__/
 *.pyc
+
+# --- Configuracion local de Claude Code (no es parte del codigo del proyecto) ---
+.claude/
+
+# --- Credenciales y configuracion sensible ---
+# backend/.env contiene credenciales reales (DB, SSH, APIs externas) y
+# nunca se commitea. Se ignora por ruta completa, explicita, en vez de
+# depender de un patron generico ".env" que matchee por nombre en
+# cualquier subdirectorio. backend/.env.example si se trackea: es la
+# plantilla sin valores reales.
+backend/.env
+
+# --- Datos y salidas generadas o descargadas por el pipeline ---
+# Rasters, overlays PNG y demas archivos que produce/descarga el
+# pipeline de ingesta (no son codigo fuente, se regeneran corriendo
+# ingest.py).
 data/
+out/
+
+# --- Documentacion interna de trabajo (specs y planes de superpowers) ---
+# Uso local del flujo de brainstorming/planning, no se publica junto
+# con el codigo del proyecto.
 docs/

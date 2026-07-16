@@ -1,0 +1,29 @@
+# --- Google Earth Engine (GEE_PROJECT, GEE_USER) ---
+earthengine-api
+geemap          # timelapse/GIF export, timestamp overlays on frames
+
+# --- NASA Earthdata (EARTHDATA_USER, EARTHDATA_PASSWORD) — GPM IMERG, MODIS ---
+earthaccess
+
+# --- USGS EarthExplorer M2M API (M2M_USERNAME, M2M_PASSWORD) — Landsat ---
+landsatxplore
+
+# --- Postgres/PostGIS + Martin tile server (DATABASE_URL, DB_*, MARTIN_DB_*) ---
+psycopg2-binary
+sqlalchemy
+geoalchemy2
+
+# --- SSH tunnel to remote DB (SSH_HOST, SSH_KEY_PATH, SSH_REMOTE_DB_PORT) ---
+sshtunnel
+
+# --- Hugging Face (HF_TOKEN) ---
+huggingface_hub
+
+# --- general geo/data handling ---
+python-dotenv
+requests
+pandas
+geopandas
+shapely
+rasterio
+Pillow

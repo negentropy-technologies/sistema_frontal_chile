@@ -59,7 +59,7 @@ Fuentes activas:
 | `nasa_imerg` (GPM IMERG Early, GES DISC directo) | `frames_raster` + `data/frames/nasa_imerg/` | diario ~1 dia, 30 min ~4 h | auth Earthdata; el global se borra tras recortar |
 | `imerg_choropleth` (IMERG diario por comuna, rasterio) | `choropleth_stats` | ~1 dia | ventanas fijas 24h/72h/7d, sin Earth Engine |
 | `noaa_ncei` (estaciones GHCND) | `station_obs` | meses | acotado a los ultimos 7 dias de la ventana |
-| `dmc` (red EMA) | `station_obs` | minutos | todas las variables del endpoint, pacing de 0.3 s |
+| `dmc` (red EMA) | `dmc_datos` (tablon ancho, FK `ema_id` -> `dmc_stations.id`) | minutos | 25 variables como columnas, upsert por estacion, pacing de 0.3 s |
 | `chirps` (CHIRPS v3.0 prelim, CHC directo) | `frames_raster` + `data/frames/chirps/` | ~7 dias | recorte por rango HTTP, sin bajar el tif global |
 
 Politica de fuentes: API directa del emisor original del dato antes
@@ -91,11 +91,11 @@ descargados no se vuelven a bajar). Editar con `crontab -e`:
 0 */6 * * * cd /ruta/al/proyecto && .venv/bin/python backend/ingest.py --days 2 >> /var/log/frontal_sur_ingest.log 2>&1
 ```
 
-Corre cada 6 horas con ventana de 2 dias: IMERG llega al catalogo de
-Earth Engine con ~24 horas de retraso (medido el 2026-07-17), asi que
-una ventana de 1 dia lo perderia sistematicamente. El solape extra es
-barato gracias a la idempotencia. CHIRPS (~7 dias de latencia) se
-recoge solo a medida que el CHC publica, sin ventana especial.
+Corre cada 6 horas con ventana de 2 dias: el solape extra es barato
+gracias a la idempotencia. CHIRPS (~7 dias de latencia) y el diario de
+IMERG (~1 dia) se recogen solos a medida que se publican, sin ventana
+especial. El log es verboso: una linea con timestamp por cada
+descarga, granulo, lote de estacion y fuente completada.
 
 ## Tests
 

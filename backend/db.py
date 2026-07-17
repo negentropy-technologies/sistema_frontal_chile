@@ -95,17 +95,28 @@ def get_engine(config: dict | None = None):
     if config is None:
         config = load_config()
     tunnel_kwargs = build_ssh_tunnel_kwargs(config)
-    with SSHTunnelForwarder(
+    tunnel = SSHTunnelForwarder(
         (tunnel_kwargs["host"], tunnel_kwargs["port"]),
         ssh_username=tunnel_kwargs["ssh_username"],
         ssh_pkey=tunnel_kwargs["ssh_pkey"],
         remote_bind_address=tunnel_kwargs["remote_bind_address"],
-    ) as tunnel:
+    )
+    # Los hilos del tunel se marcan daemon ANTES de start(): sin esto,
+    # sshtunnel puede quedarse colgado indefinidamente en stop() si
+    # alguna conexion del pool de SQLAlchemy sigue viva al cerrar
+    # (comprobado empiricamente el 2026-07-17: un cierre tardo 17
+    # minutos). Con hilos daemon, stop() no espera a esos forwarders.
+    tunnel.daemon_forward_servers = True
+    tunnel.daemon_transport = True
+    tunnel.start()
+    try:
         engine = create_engine(build_db_url(config, tunnel.local_bind_port))
         try:
             yield engine
         finally:
             engine.dispose()
+    finally:
+        tunnel.stop()
 
 
 def build_upsert_sql(

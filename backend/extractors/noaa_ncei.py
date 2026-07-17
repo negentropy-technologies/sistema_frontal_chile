@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import requests
 
 from extractors._http import build_session
+from logutil import log
 
 NOAA_DATA_URL = "https://www.ncei.noaa.gov/access/services/data/v1"
 NOAA_SEARCH_URL = "https://www.ncei.noaa.gov/access/services/search/v1/data"
@@ -77,6 +78,7 @@ def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
     """
     session = build_session()
     stations = _station_ids(session, start, end, bbox)
+    log(f"noaa: {len(stations)} estaciones GHCND con datos en la ventana")
     if not stations:
         return []
 

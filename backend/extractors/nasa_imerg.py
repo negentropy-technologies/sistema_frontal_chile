@@ -40,6 +40,7 @@ from rasterio.transform import from_origin
 from db import load_config
 from extractors._http import mount_retries
 from extractors._raster import save_png_overlay
+from logutil import log
 
 GESDISC_BASE = "https://gpm1.gesdisc.eosdis.nasa.gov/data/GPM_L3"
 DAILY_PRODUCT = "GPM_3IMERGDE.07"
@@ -183,12 +184,16 @@ def _fetch_daily(session: EarthdataSession, start: datetime, end: datetime, bbox
             fecha = day.strftime("%Y%m%d")
             files = _listing(session, dir_url, rf'href="(3B-DAY-E\.MS\.MRG\.3IMERG\.{fecha}-[^"]+\.nc4)"')
             if not files:
+                log(f"imerg diario {day:%Y-%m-%d}: aun no publicado por GES DISC, se salta")
                 day += timedelta(days=1)
                 continue
             global_file = tif_path.parent / files[0]
             _download(session, dir_url + files[0], global_file)
             _crop_to_tif(global_file, "NETCDF", bbox, tif_path)
             global_file.unlink()
+            log(f"imerg diario {day:%Y-%m-%d}: descargado y recortado")
+        else:
+            log(f"imerg diario {day:%Y-%m-%d}: ya existia en disco")
         if not png_path.exists():
             save_png_overlay(tif_path, png_path)
         rows.append(_row("imerg_early_daily", day, bbox, tif_path, png_path))
@@ -223,6 +228,8 @@ def _fetch_half_hourly(session: EarthdataSession, start: datetime, end: datetime
                 tasks.append((dir_url + filename, valid_time))
         day += timedelta(days=1)
 
+    log(f"imerg 30min: {len(tasks)} granulos en la ventana, descargando con {HHR_WORKERS} hilos")
+
     def process(task):
         url, valid_time = task
         stamp = valid_time.strftime("%Y%m%dT%H%M%S")
@@ -235,6 +242,9 @@ def _fetch_half_hourly(session: EarthdataSession, start: datetime, end: datetime
             _download(_thread_locals.session, url, global_file)
             _crop_to_tif(global_file, "HDF5", bbox, tif_path)
             global_file.unlink()
+            log(f"imerg 30min {stamp}: descargado y recortado")
+        else:
+            log(f"imerg 30min {stamp}: ya existia en disco")
         if not png_path.exists():
             save_png_overlay(tif_path, png_path)
         return _row("imerg_early_30min", valid_time, bbox, tif_path, png_path)
@@ -268,13 +278,18 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
     return rows
 
 
-def _comuna_geometries() -> list[tuple[int, dict]]:
+def _comuna_geometries(engine=None) -> list[tuple[int, dict]]:
     """
-    Lee de Postgres (rol frontal_sur_app) las geometrias de las
-    comunas de CHOROPLETH_REGION_IDS como GeoJSON simplificado
-    (tolerancia ~1 km, suficiente a la escala de 10 km de IMERG), con
-    cache de proceso: el orquestador pide 3 ventanas por corrida y las
-    comunas no cambian entre llamadas.
+    Lee de Postgres las geometrias de las comunas de
+    CHOROPLETH_REGION_IDS como GeoJSON simplificado (tolerancia ~1 km,
+    suficiente a la escala de 10 km de IMERG), con cache de proceso:
+    el orquestador pide 3 ventanas por corrida y las comunas no
+    cambian entre llamadas.
+
+    Usa el engine que entrega el orquestador (UN tunel SSH por
+    corrida); solo abre conexion propia si se llama sin engine (tests
+    o uso interactivo), porque un tunel anidado dentro del pipeline
+    colgaba el cierre de sshtunnel.
     """
     global _comuna_cache
     if _comuna_cache is not None:
@@ -284,26 +299,35 @@ def _comuna_geometries() -> list[tuple[int, dict]]:
 
     from sqlalchemy import text
 
-    from db import get_engine
+    query = text("""
+        select c.comuna_id,
+               ST_AsGeoJSON(ST_SimplifyPreserveTopology(c.geometria, 0.01)) as geojson
+        from dpa_limites.dpa_comuna_subdere c
+        join dpa_limites.dpa_provincia_subdere p on p.id_provincia = c.id_provincia
+        where p.id_region = ANY(:region_ids)
+    """)
+    params = {"region_ids": list(CHOROPLETH_REGION_IDS)}
 
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-    with get_engine(config) as engine:
+    if engine is not None:
         with engine.connect() as conn:
-            records = conn.execute(text("""
-                select c.comuna_id,
-                       ST_AsGeoJSON(ST_SimplifyPreserveTopology(c.geometria, 0.01)) as geojson
-                from dpa_limites.dpa_comuna_subdere c
-                join dpa_limites.dpa_provincia_subdere p on p.id_provincia = c.id_provincia
-                where p.id_region = ANY(:region_ids)
-            """), {"region_ids": list(CHOROPLETH_REGION_IDS)}).fetchall()
+            records = conn.execute(query, params).fetchall()
+    else:
+        from db import get_engine
+
+        config = dict(load_config())
+        config["DB_USER"] = config["DB_APP_USER"]
+        config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
+        with get_engine(config) as own_engine:
+            with own_engine.connect() as conn:
+                records = conn.execute(query, params).fetchall()
+
     _comuna_cache = [(comuna_id, json.loads(geojson)) for comuna_id, geojson in records]
+    log(f"coropletas: {len(_comuna_cache)} comunas cargadas del catalogo DPA")
     return _comuna_cache
 
 
 def fetch_choropleth(start: datetime, end: datetime, bbox: tuple,
-                     variable: str = "imerg_precipitation") -> list[dict]:
+                     variable: str = "imerg_precipitation", engine=None) -> list[dict]:
     """
     Suma la precipitacion diaria IMERG Early de [start, end] pixel a
     pixel y la agrega por comuna con una mascara de geometria
@@ -322,6 +346,7 @@ def fetch_choropleth(start: datetime, end: datetime, bbox: tuple,
     session = _session(load_config())
     daily_rows = _fetch_daily(session, start, end, bbox)
     if not daily_rows:
+        log(f"coropletas {variable}: sin dias IMERG publicados en la ventana, se salta")
         return []
 
     accumulated = None
@@ -335,7 +360,7 @@ def fetch_choropleth(start: datetime, end: datetime, bbox: tuple,
 
     valid_time = end.replace(minute=0, second=0, microsecond=0)
     rows = []
-    for comuna_id, geometry in _comuna_geometries():
+    for comuna_id, geometry in _comuna_geometries(engine):
         mask = geometry_mask([geometry], out_shape=accumulated.shape,
                              transform=transform, invert=True, all_touched=True)
         value = float(accumulated[mask].sum()) if mask.any() else 0.0

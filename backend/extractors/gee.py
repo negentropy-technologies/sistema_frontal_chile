@@ -30,6 +30,7 @@ import requests
 from db import load_config
 from extractors._raster import save_png_overlay
 from extractors._retry import retry
+from logutil import log
 
 GOES_COLLECTION = "NOAA/GOES/19/MCMIPF"
 GOES_BANDS = ["CMI_C08", "CMI_C09", "CMI_C10", "CMI_C13"]
@@ -127,13 +128,18 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
         .filterBounds(region)
         .select(GOES_BANDS)
     )
+    hourly = _hourly_images(collection)
+    log(f"goes: {len(hourly)} frames horarios en la ventana")
     rows = []
-    for image, valid_time in _hourly_images(collection):
+    for image, valid_time in hourly:
         stamp = valid_time.strftime("%Y%m%dT%H%M%S")
         tif_path = DATA_DIR / "goes_cloud_moisture" / f"{stamp}.tif"
         png_path = DATA_DIR / "goes_cloud_moisture" / f"{stamp}.png"
         if not tif_path.exists():
             _download_geotiff(image, region, tif_path, scale=2000)
+            log(f"goes {stamp}: descargado")
+        else:
+            log(f"goes {stamp}: ya existia en disco")
         if not png_path.exists():
             save_png_overlay(tif_path, png_path)
         rows.append({

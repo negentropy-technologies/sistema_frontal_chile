@@ -27,6 +27,7 @@ from rasterio.windows import from_bounds
 from extractors._http import build_session
 from extractors._raster import save_png_overlay
 from extractors._retry import retry
+from logutil import log
 
 CHC_BASE_URL = "https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/prelim/sat"
 
@@ -87,9 +88,13 @@ def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
             # no publicado" (404, se salta sin reintentos) de un error
             # real de red (lo maneja el retry de _crop_day).
             if session.head(url, timeout=20).status_code == 404:
+                log(f"chirps {day:%Y-%m-%d}: aun no publicado por el CHC, se salta")
                 day += timedelta(days=1)
                 continue
             _crop_day(url, bbox, tif_path)
+            log(f"chirps {day:%Y-%m-%d}: recortado por rango HTTP")
+        else:
+            log(f"chirps {day:%Y-%m-%d}: ya existia en disco")
         if not png_path.exists():
             save_png_overlay(tif_path, png_path)
 

@@ -28,6 +28,7 @@ from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
 from extractors import chirps, dmc, gee, nasa_imerg, noaa_ncei
+from logutil import log
 
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
 # Lagos, mas la Zona Economica Exclusiva y Plataforma Continental de
@@ -48,7 +49,7 @@ CHOROPLETH_WINDOWS = (
 )
 
 
-def _fetch_choropleth_windows(start: datetime, end: datetime) -> list[dict]:
+def _fetch_choropleth_windows(start: datetime, end: datetime, engine) -> list[dict]:
     """
     Corre la agregacion por comuna una vez por cada ventana de
     CHOROPLETH_WINDOWS, siempre ancladas a "end" (el presente de la
@@ -57,24 +58,28 @@ def _fetch_choropleth_windows(start: datetime, end: datetime) -> list[dict]:
     """
     rows = []
     for days, variable in CHOROPLETH_WINDOWS:
-        rows += nasa_imerg.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX, variable=variable)
+        rows += nasa_imerg.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX,
+                                            variable=variable, engine=engine)
     return rows
 
 
 # Cada entrada: (nombre de la fuente, funcion fetch, tabla destino,
-# columnas de conflicto, columnas de geometria). ingest_runs registra
-# el resultado de cada una por separado.
+# columnas de conflicto, columnas de geometria). Toda funcion fetch
+# recibe (start, end, engine): el engine es el UNICO tunel SSH de la
+# corrida y las fuentes que leen la BD (dmc, coropletas) lo reusan en
+# vez de abrir un tunel anidado, cuyo cierre colgaba sshtunnel.
+# ingest_runs registra el resultado de cada fuente por separado.
 SOURCES = [
     (
         "gee_goes",
-        lambda start, end: gee.fetch_frames(start, end, REGION_BBOX),
+        lambda start, end, engine: gee.fetch_frames(start, end, REGION_BBOX),
         "frontal_sur.frames_raster",
         ["source", "variable", "region", "valid_time"],
         None,
     ),
     (
         "nasa_imerg",
-        lambda start, end: nasa_imerg.fetch_frames(start, end, REGION_BBOX),
+        lambda start, end, engine: nasa_imerg.fetch_frames(start, end, REGION_BBOX),
         "frontal_sur.frames_raster",
         ["source", "variable", "region", "valid_time"],
         None,
@@ -93,24 +98,26 @@ SOURCES = [
         # GHCND publica Chile con meses de retraso, asi que esta
         # fuente dara 0 filas hasta que NCEI se ponga al dia.
         "noaa_ncei",
-        lambda start, end: noaa_ncei.fetch(max(start, end - timedelta(days=7)), end, REGION_BBOX),
+        lambda start, end, engine: noaa_ncei.fetch(max(start, end - timedelta(days=7)), end, REGION_BBOX),
         "frontal_sur.station_obs",
         ["source", "variable", "station_id", "valid_time"],
         {"geometria": 4326},
     ),
     (
-        # dmc entrega un generador (un lote de filas por estacion) en
-        # vez de una lista: run() upsertea cada lote apenas llega para
-        # que el pico de memoria no dependa del tamano de la ventana.
+        # dmc escribe el tablon ancho dmc_datos (una columna por
+        # variable, FK ema_id al catalogo; la geometria no se repite
+        # por fila). Entrega un generador con un lote por estacion:
+        # run() upsertea cada lote apenas llega para que el pico de
+        # memoria no dependa del tamano de la ventana.
         "dmc",
-        lambda start, end: dmc.fetch_batches(start, end, REGION_BBOX),
-        "frontal_sur.station_obs",
-        ["source", "variable", "station_id", "valid_time"],
-        {"geometria": 4326},
+        lambda start, end, engine: dmc.fetch_batches(start, end, REGION_BBOX, engine),
+        "frontal_sur.dmc_datos",
+        ["ema_id", "momento"],
+        None,
     ),
     (
         "chirps",
-        lambda start, end: chirps.fetch(start, end, REGION_BBOX),
+        lambda start, end, engine: chirps.fetch(start, end, REGION_BBOX),
         "frontal_sur.frames_raster",
         ["source", "variable", "region", "valid_time"],
         None,
@@ -178,8 +185,9 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
     with get_engine(config) as engine:
         for name, fetch_fn, table, conflict_cols, geom_cols in SOURCES:
             started_at = datetime.now(timezone.utc)
+            log(f"== fuente {name}: inicio (ventana {start:%Y-%m-%d %H:%M} a {end:%Y-%m-%d %H:%M} UTC)")
             try:
-                result = fetch_fn(start, end)
+                result = fetch_fn(start, end, engine)
                 if isinstance(result, GeneratorType):
                     # Fuente por lotes (dmc): cada lote se upsertea
                     # apenas sale del generador, para que el pico de
@@ -189,13 +197,14 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
                         if not dry_run:
                             upsert(engine, table, batch, conflict_cols, geom_cols)
                         count += len(batch)
+                        log(f"{name}: lote de {len(batch)} filas" + (" (dry-run)" if dry_run else " upserteado"))
                 else:
                     if not dry_run:
                         upsert(engine, table, result, conflict_cols, geom_cols)
                     count = len(result)
                 status = "ok"
                 error = None
-                print(f"{name}: {count} filas" + (" (dry-run, no escrito)" if dry_run else ""))
+                log(f"== fuente {name}: fin, {count} filas" + (" (dry-run, no escrito)" if dry_run else ""))
             except Exception as exc:
                 # Se guarda solo el str() de la excepcion: los
                 # extractores no interpolan API keys ni passwords en
@@ -203,7 +212,7 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
                 # filtra secretos a ingest_runs ni al log del cron.
                 status = "error"
                 error = str(exc)
-                print(f"{name}: fallo -> {error}")
+                log(f"== fuente {name}: fallo -> {error}")
 
             if dry_run:
                 continue

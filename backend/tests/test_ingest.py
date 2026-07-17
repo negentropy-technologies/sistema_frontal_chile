@@ -46,11 +46,11 @@ def test_upsert_is_idempotent():
         "source": "test_ingest_idempotency",
         "station_id": "TEST0001",
         "station_name": "estacion sintetica de test",
-        "geom": "POINT(-71.0 -35.0)",
         "valid_time": datetime(2000, 1, 1, tzinfo=timezone.utc),
         "variable": "TMAX",
         "value": 1.0,
         "unit": "metric",
+        "geometria": "POINT(-71.0 -35.0)",
     }
     conflict_cols = ["source", "variable", "station_id", "valid_time"]
     where = "source = :source"
@@ -58,11 +58,11 @@ def test_upsert_is_idempotent():
 
     with get_engine(config) as engine:
         try:
-            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geom": 4326})
+            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geometria": 4326})
             # Segunda pasada con otro value: debe actualizar la misma
             # fila (ON CONFLICT DO UPDATE), no insertar una segunda.
             row["value"] = 2.0
-            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geom": 4326})
+            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geometria": 4326})
 
             with engine.connect() as conn:
                 count = conn.execute(text(

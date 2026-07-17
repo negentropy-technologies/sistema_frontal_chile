@@ -31,12 +31,12 @@ def test_fetch_returns_well_shaped_rows():
     # asi que solo se valida la forma de las filas que si llegaron.
     for row in rows:
         assert set(row.keys()) == {
-            "source", "station_id", "station_name", "geom",
+            "source", "station_id", "station_name", "geometria",
             "valid_time", "variable", "value", "unit",
         }
         assert row["source"] == "noaa_ncei"
         assert isinstance(row["station_id"], str)
-        assert row["geom"].startswith("POINT(")
+        assert row["geometria"].startswith("POINT(")
         assert isinstance(row["valid_time"], datetime)
         assert row["valid_time"].tzinfo is not None
         assert row["variable"] in ("TMAX", "TMIN", "PRCP", "AWND")

@@ -119,10 +119,10 @@ def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
                 "source": "noaa_ncei",
                 "station_id": station_id,
                 "station_name": station_name,
-                "geom": f"POINT({longitude} {latitude})",
                 "valid_time": valid_time,
                 "variable": variable,
                 "value": float(raw_value),
                 "unit": "metric",
+                "geometria": f"POINT({longitude} {latitude})",
             })
     return rows

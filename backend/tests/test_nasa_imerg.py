@@ -22,7 +22,7 @@ import rasterio
 from extractors.nasa_imerg import _bbox_slices, _session, _fetch_daily, _fetch_half_hourly, fetch_choropleth
 from db import load_config
 
-REGION_BBOX = (-85.0, -44.5, -69.5, -32.5)
+REGION_BBOX = (-118.5, -44.5, -69.5, -32.5)
 
 FRAME_KEYS = {
     "source", "variable", "region", "valid_time",
@@ -32,9 +32,10 @@ FRAME_KEYS = {
 
 def test_bbox_slices_math():
     rows, cols = _bbox_slices(REGION_BBOX)
-    # Grilla global 0.1 grados: lon -85 -> columna 950, lat +90-(-32.5)
-    # -> fila 1225. El recorte debe medir 155 columnas x 120 filas.
-    assert (cols.start, cols.stop) == (950, 1105)
+    # Grilla global 0.1 grados: lon -118.5 -> columna 615, lat
+    # +90-(-32.5) -> fila 1225. El recorte debe medir 490 columnas
+    # (hasta el Mar Presencial) x 120 filas.
+    assert (cols.start, cols.stop) == (615, 1105)
     assert (rows.start, rows.stop) == (1225, 1345)
 
 

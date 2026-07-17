@@ -73,8 +73,9 @@ Almacenamiento: TODOS los rasters viven en disco (`data/frames/`) y
 se serviran con un tiler u overlays PNG; la BD solo guarda metadatos
 (`frames_raster`) y vectores. Convenciones: toda columna de geometria
 se llama `geometria` (o `geometria_<rol>`) y va al final de la tabla;
-el bbox del proyecto (`REGION_BBOX` en `ingest.py`, RM a Los Lagos +
-ZEE) es la unica fuente de verdad geografica.
+el bbox del proyecto (`REGION_BBOX` en `ingest.py`, RM a Los Lagos
+mas todos los espacios marinos hasta el limite oeste del Mar
+Presencial) es la unica fuente de verdad geografica.
 
 Fuera del pipeline por ahora: Google Flood Hub (waitlist de Google
 pendiente), MSWEP (requiere registro en GloH2O y acceso a su Drive),

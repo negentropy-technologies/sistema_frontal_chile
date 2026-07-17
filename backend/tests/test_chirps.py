@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from extractors.chirps import fetch
 
-REGION_BBOX = (-85.0, -44.5, -69.5, -32.5)
+REGION_BBOX = (-118.5, -44.5, -69.5, -32.5)
 
 
 def test_fetch_returns_well_shaped_rows():

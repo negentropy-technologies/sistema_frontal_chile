@@ -31,9 +31,12 @@ from extractors import chirps, dmc, gee, nasa_imerg, noaa_ncei
 from logutil import log
 
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
-# Lagos, mas la Zona Economica Exclusiva y Plataforma Continental de
-# dpa_limites.espacio_marino_chile recortada a esa banda de latitud.
-REGION_BBOX = (-85.0, -44.5, -69.5, -32.5)
+# Lagos, mas TODOS los espacios marinos de
+# dpa_limites.espacio_marino_chile recortados a esa banda de latitud.
+# El limite oeste lo fija el Mar Presencial (lon -118.0 medido en la
+# BD el 2026-07-17; la ZEE sola llegaba a -84.8), redondeado con
+# margen chico a -118.5.
+REGION_BBOX = (-118.5, -44.5, -69.5, -32.5)
 
 MIN_DAYS = 1
 MAX_DAYS = 90

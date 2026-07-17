@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
-from extractors import gee, noaa_ncei
+from extractors import chirps, dmc, gee, noaa_ncei
 
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
 # Lagos, mas la Zona Economica Exclusiva y Plataforma Continental de
@@ -37,6 +37,30 @@ REGION_BBOX = (-85.0, -44.5, -69.5, -32.5)
 
 MIN_DAYS = 1
 MAX_DAYS = 90
+
+# Ventanas de acumulacion de precipitacion por comuna definidas en la
+# tabla de productos del spec general (coropletas 24h/72h/7d). Son
+# fijas e independientes de --days: --days controla cuanta historia de
+# frames se descarga, no que acumulados muestra el mapa.
+CHOROPLETH_WINDOWS = (
+    (1, "imerg_precipitation_24h"),
+    (3, "imerg_precipitation_72h"),
+    (7, "imerg_precipitation_7d"),
+)
+
+
+def _fetch_choropleth_windows(start: datetime, end: datetime) -> list[dict]:
+    """
+    Corre la agregacion por comuna una vez por cada ventana de
+    CHOROPLETH_WINDOWS, siempre ancladas a "end" (el presente de la
+    corrida). "start" se ignora deliberadamente: los acumulados del
+    mapa son fijos aunque el backfill de frames use otra ventana.
+    """
+    rows = []
+    for days, variable in CHOROPLETH_WINDOWS:
+        rows += gee.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX, variable=variable)
+    return rows
+
 
 # Cada entrada: (nombre de la fuente, funcion fetch, tabla destino,
 # columnas de conflicto, columnas de geometria). ingest_runs registra
@@ -51,7 +75,7 @@ SOURCES = [
     ),
     (
         "gee_choropleth",
-        lambda start, end: gee.fetch_choropleth(start, end, REGION_BBOX),
+        _fetch_choropleth_windows,
         "frontal_sur.choropleth_stats",
         ["comuna_id", "variable", "agg", "valid_time"],
         None,
@@ -61,7 +85,21 @@ SOURCES = [
         lambda start, end: noaa_ncei.fetch(start, end, REGION_BBOX),
         "frontal_sur.station_obs",
         ["source", "variable", "station_id", "valid_time"],
-        {"geom": 4326},
+        {"geometria": 4326},
+    ),
+    (
+        "dmc",
+        lambda start, end: dmc.fetch(start, end, REGION_BBOX),
+        "frontal_sur.station_obs",
+        ["source", "variable", "station_id", "valid_time"],
+        {"geometria": 4326},
+    ),
+    (
+        "chirps",
+        lambda start, end: chirps.fetch(start, end, REGION_BBOX),
+        "frontal_sur.frames_raster",
+        ["source", "variable", "region", "valid_time"],
+        None,
     ),
     # flood_hub queda fuera de SOURCES: ver "Flood Hub, diferido a un
     # plan separado" en el plan de implementacion. Cuando llegue el
@@ -100,7 +138,19 @@ def _app_role_config() -> dict:
     return config
 
 
-def run(days: int, dry_run: bool) -> None:
+def parse_date(raw: str) -> datetime:
+    """
+    Valida una fecha YYYY-MM-DD de --start/--end y la devuelve anclada
+    a medianoche UTC. Igual que parse_days, es input externo del
+    script y se valida antes de llegar a los extractores.
+    """
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        raise ValueError(f"la fecha debe ser YYYY-MM-DD, se recibio {raw!r}")
+
+
+def run(start: datetime, end: datetime, dry_run: bool) -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -109,8 +159,6 @@ def run(days: int, dry_run: bool) -> None:
     ingest_runs, pero el tunel igual se abre: valida de paso que la
     conexion con el rol acotado funciona.
     """
-    end = datetime.now(timezone.utc)
-    start = end - timedelta(days=days)
     config = _app_role_config()
 
     with get_engine(config) as engine:
@@ -150,12 +198,28 @@ def run(days: int, dry_run: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Orquestador de ingesta de frontal_sur")
-    parser.add_argument("--days", default="7", help=f"ventana en dias, entre {MIN_DAYS} y {MAX_DAYS} (default: 7)")
+    parser.add_argument("--days", default="7", help=f"ventana en dias hacia atras desde ahora, entre {MIN_DAYS} y {MAX_DAYS} (default: 7)")
+    parser.add_argument("--start", default=None, help="fecha inicial YYYY-MM-DD (extraccion por fechas definidas; requiere --end)")
+    parser.add_argument("--end", default=None, help="fecha final YYYY-MM-DD (con --start)")
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
     args = parser.parse_args()
 
-    days = parse_days(args.days)
-    run(days=days, dry_run=args.dry_run)
+    # Dos modos de ventana: --days (relativa al presente, para el cron)
+    # o --start/--end (fechas definidas, para backfill puntual). Son
+    # excluyentes en la practica: si viene --start, manda el rango.
+    if args.start is not None or args.end is not None:
+        if args.start is None or args.end is None:
+            raise ValueError("--start y --end van juntos")
+        start = parse_date(args.start)
+        end = parse_date(args.end)
+        if start >= end:
+            raise ValueError("--start debe ser anterior a --end")
+    else:
+        days = parse_days(args.days)
+        end = datetime.now(timezone.utc)
+        start = end - timedelta(days=days)
+
+    run(start=start, end=end, dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

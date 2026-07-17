@@ -200,6 +200,12 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
 # zona.
 CHOROPLETH_REGION_IDS = (13, 6, 7, 16, 8, 9, 14, 10)
 
+# Cache de proceso para las geometrias de comuna: el orquestador llama
+# fetch_choropleth tres veces por corrida (ventanas 24h/72h/7d) y las
+# comunas no cambian entre llamadas; sin esto se abririan tres tuneles
+# SSH a la BD por corrida.
+_comuna_cache = None
+
 
 def _comuna_features() -> "ee.FeatureCollection":
     """
@@ -216,6 +222,10 @@ def _comuna_features() -> "ee.FeatureCollection":
     el limite de request de Earth Engine; a la escala de agregacion de
     IMERG (10 km por pixel) esa simplificacion no cambia el resultado.
     """
+    global _comuna_cache
+    if _comuna_cache is not None:
+        return _comuna_cache
+
     import json
 
     from sqlalchemy import text
@@ -240,10 +250,12 @@ def _comuna_features() -> "ee.FeatureCollection":
     for comuna_id, geojson_text in records:
         geometry = ee.Geometry(json.loads(geojson_text))
         features.append(ee.Feature(geometry, {"comuna_id": comuna_id}))
-    return ee.FeatureCollection(features)
+    _comuna_cache = ee.FeatureCollection(features)
+    return _comuna_cache
 
 
-def fetch_choropleth(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
+def fetch_choropleth(start: datetime, end: datetime, bbox: tuple,
+                     variable: str = "imerg_precipitation") -> list[dict]:
     """
     Suma la precipitacion IMERG dentro de [start, end] para cada
     comuna de CHOROPLETH_REGION_IDS (ee.Reducer.sum() via
@@ -288,7 +300,7 @@ def fetch_choropleth(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
         properties = feature["properties"]
         rows.append({
             "comuna_id": int(properties["comuna_id"]),
-            "variable": "imerg_precipitation",
+            "variable": variable,
             "agg": "sum",
             "value": float(properties.get("sum", 0.0)),
             "valid_time": valid_time,

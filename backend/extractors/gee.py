@@ -259,14 +259,22 @@ def fetch_choropleth(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
     cron) insertaria filas nuevas en vez de upsertear las existentes.
     """
     initialize()
-    comunas = _comuna_features()
 
-    imerg_sum = (
+    window = (
         ee.ImageCollection(IMERG_COLLECTION)
         .filterDate(start.isoformat(), end.isoformat())
         .select(IMERG_BAND)
-        .sum()
     )
+    # IMERG llega al catalogo de GEE con ~24 horas de retraso, asi que
+    # una ventana corta puede venir vacia; sum() sobre una coleccion
+    # vacia produce una imagen sin bandas y reduceRegions falla con
+    # "Image has no bands". Se corta aqui antes de abrir el tunel a la
+    # BD (que solo hace falta para leer las comunas).
+    if window.size().getInfo() == 0:
+        return []
+
+    comunas = _comuna_features()
+    imerg_sum = window.sum()
 
     reduced = imerg_sum.reduceRegions(
         collection=comunas,

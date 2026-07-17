@@ -5,8 +5,8 @@ Correr con: .venv/bin/python backend/tests/test_ingest.py
 
 test_parse_days_* no usa red ni BD. test_upsert_is_idempotent SI pega
 contra la BD real (rol frontal_sur_app): inserta una fila sintetica
-dos veces en frontal_sur.station_obs (que tiene UNIQUE sobre source,
-variable, station_id, valid_time) y verifica que la segunda pasada no
+dos veces en frontal_sur.frames_raster (que tiene UNIQUE sobre source,
+variable, region, valid_time) y verifica que la segunda pasada no
 duplica filas, luego limpia lo que inserto.
 """
 
@@ -44,39 +44,39 @@ def test_upsert_is_idempotent():
 
     row = {
         "source": "test_ingest_idempotency",
-        "station_id": "TEST0001",
-        "station_name": "estacion sintetica de test",
+        "variable": "test_variable",
+        "region": "test_region",
         "valid_time": datetime(2000, 1, 1, tzinfo=timezone.utc),
-        "variable": "TMAX",
-        "value": 1.0,
-        "unit": "metric",
-        "geometria": "POINT(-71.0 -35.0)",
+        "bbox": [-118.5, -44.5, -69.5, -32.5],
+        "file_path": "/tmp/test_ingest.tif",
+        "png_overlay_path": "/tmp/test_ingest.png",
+        "created_at": datetime(2000, 1, 1, tzinfo=timezone.utc),
     }
-    conflict_cols = ["source", "variable", "station_id", "valid_time"]
+    conflict_cols = ["source", "variable", "region", "valid_time"]
     where = "source = :source"
     params = {"source": row["source"]}
 
     with get_engine(config) as engine:
         try:
-            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geometria": 4326})
-            # Segunda pasada con otro value: debe actualizar la misma
-            # fila (ON CONFLICT DO UPDATE), no insertar una segunda.
-            row["value"] = 2.0
-            upsert(engine, "frontal_sur.station_obs", [row], conflict_cols, {"geometria": 4326})
+            upsert(engine, "frontal_sur.frames_raster", [row], conflict_cols)
+            # Segunda pasada con otro file_path: debe actualizar la
+            # misma fila (ON CONFLICT DO UPDATE), no insertar otra.
+            row["file_path"] = "/tmp/test_ingest_v2.tif"
+            upsert(engine, "frontal_sur.frames_raster", [row], conflict_cols)
 
             with engine.connect() as conn:
                 count = conn.execute(text(
-                    f"select count(*) from frontal_sur.station_obs where {where}"
+                    f"select count(*) from frontal_sur.frames_raster where {where}"
                 ), params).scalar()
-                value = conn.execute(text(
-                    f"select value from frontal_sur.station_obs where {where}"
+                path = conn.execute(text(
+                    f"select file_path from frontal_sur.frames_raster where {where}"
                 ), params).scalar()
             assert count == 1, f"se esperaba 1 fila tras dos upserts, hay {count}"
-            assert value == 2.0, f"se esperaba value actualizado a 2.0, hay {value}"
+            assert path == "/tmp/test_ingest_v2.tif", f"se esperaba file_path actualizado, hay {path}"
         finally:
             with engine.begin() as conn:
                 conn.execute(text(
-                    f"delete from frontal_sur.station_obs where {where}"
+                    f"delete from frontal_sur.frames_raster where {where}"
                 ), params)
 
 

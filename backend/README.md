@@ -58,7 +58,6 @@ Fuentes activas:
 | `gee_goes` (GOES-19 via GEE) | `frames_raster` + GeoTIFF/PNG en `data/frames/gee/` | ~30 min | 1 frame por hora, recortado al bbox |
 | `nasa_imerg` (GPM IMERG Early, GES DISC directo) | `frames_raster` + `data/frames/nasa_imerg/` | diario ~1 dia, 30 min ~4 h | auth Earthdata; el global se borra tras recortar |
 | `imerg_choropleth` (IMERG diario por comuna, rasterio) | `choropleth_stats` | ~1 dia | ventanas fijas 24h/72h/7d, sin Earth Engine |
-| `noaa_ncei` (estaciones GHCND) | `station_obs` | meses | acotado a los ultimos 7 dias de la ventana |
 | `dmc` (red EMA) | `dmc_datos` (tablon ancho, FK `ema_id` -> `dmc_stations.id`) | minutos | 25 variables como columnas, upsert por estacion, pacing de 0.3 s |
 | `chirps` (CHIRPS v3.0 prelim, CHC directo) | `frames_raster` + `data/frames/chirps/` | ~7 dias | recorte por rango HTTP, sin bajar el tif global |
 
@@ -77,8 +76,10 @@ el bbox del proyecto (`REGION_BBOX` en `ingest.py`, RM a Los Lagos
 mas todos los espacios marinos hasta el limite oeste del Mar
 Presencial) es la unica fuente de verdad geografica.
 
-Fuera del pipeline por ahora: Google Flood Hub (waitlist de Google
-pendiente), MSWEP (requiere registro en GloH2O y acceso a su Drive),
+Fuera del pipeline: NOAA NCEI (retirado el 2026-07-17: GHCND
+publica Chile con ~1 anio de retraso, incompatible con monitoreo
+near real time), Google Flood Hub (waitlist de Google pendiente),
+MSWEP (requiere registro en GloH2O y acceso a su Drive),
 CHIRPS v3 final (el CHC lo publica con meses de retraso; el upsert
 reemplazara los preliminares cuando exista).
 
@@ -109,13 +110,12 @@ Sin pytest: cada archivo en `backend/tests/` corre con `assert` plano.
 .venv/bin/python backend/tests/test_retry.py
 .venv/bin/python backend/tests/test_http.py
 .venv/bin/python backend/tests/test_dmc.py
-.venv/bin/python backend/tests/test_noaa_ncei.py
 .venv/bin/python backend/tests/test_gee.py
 .venv/bin/python backend/tests/test_nasa_imerg.py
 .venv/bin/python backend/tests/test_chirps.py
 .venv/bin/python backend/tests/test_ingest.py
 ```
 
-Los tests de `noaa_ncei`, `gee`, `nasa_imerg`, `chirps` e `ingest`
+Los tests de `gee`, `nasa_imerg`, `chirps` e `ingest`
 (parcialmente) llaman a APIs externas reales o a la BD real con el rol
 acotado `frontal_sur_app`; no hay mocks en este proyecto.

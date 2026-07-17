@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
-from extractors import chirps, dmc, gee, nasa_imerg, noaa_ncei
+from extractors import chirps, dmc, gee, nasa_imerg
 from logutil import log
 
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
@@ -94,18 +94,10 @@ SOURCES = [
         ["comuna_id", "variable", "agg", "valid_time"],
         None,
     ),
-    (
-        # NOAA NCEI acotado a los ultimos 7 dias de la ventana aunque
-        # la corrida use --days grande o --start/--end (decision del
-        # 2026-07-17: sin backfill historico de esta fuente). Ojo:
-        # GHCND publica Chile con meses de retraso, asi que esta
-        # fuente dara 0 filas hasta que NCEI se ponga al dia.
-        "noaa_ncei",
-        lambda start, end, engine: noaa_ncei.fetch(max(start, end - timedelta(days=7)), end, REGION_BBOX),
-        "frontal_sur.station_obs",
-        ["source", "variable", "station_id", "valid_time"],
-        {"geometria": 4326},
-    ),
+    # NOAA NCEI se retiro del sistema el 2026-07-17: GHCND publica las
+    # estaciones chilenas con ~1 anio de retraso, incompatible con
+    # monitoreo near real time; el contexto de estaciones lo cubre la
+    # DMC. Ver migracion 0011 y el historial de git si se retoma.
     (
         # dmc escribe el tablon ancho dmc_datos (una columna por
         # variable, FK ema_id al catalogo; la geometria no se repite

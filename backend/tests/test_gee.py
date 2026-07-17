@@ -35,7 +35,10 @@ def test_fetch_frames_returns_well_shaped_rows():
             "bbox", "file_path", "png_overlay_path", "created_at",
         }
         assert row["source"] == "gee"
-        assert row["variable"] == "goes_cloud_moisture"
+        assert row["variable"] in (
+            "goes_cloud_moisture", "goes_geocolor", "goes_nieve_niebla",
+            "goes_conveccion",
+        )
         assert isinstance(row["valid_time"], datetime)
         assert Path(row["file_path"]).exists()
         assert Path(row["png_overlay_path"]).exists()

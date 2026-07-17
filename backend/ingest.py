@@ -81,8 +81,13 @@ SOURCES = [
         None,
     ),
     (
+        # NOAA NCEI acotado a los ultimos 7 dias de la ventana aunque
+        # la corrida use --days grande o --start/--end (decision del
+        # 2026-07-17: sin backfill historico de esta fuente). Ojo:
+        # GHCND publica Chile con meses de retraso, asi que esta
+        # fuente dara 0 filas hasta que NCEI se ponga al dia.
         "noaa_ncei",
-        lambda start, end: noaa_ncei.fetch(start, end, REGION_BBOX),
+        lambda start, end: noaa_ncei.fetch(max(start, end - timedelta(days=7)), end, REGION_BBOX),
         "frontal_sur.station_obs",
         ["source", "variable", "station_id", "valid_time"],
         {"geometria": 4326},

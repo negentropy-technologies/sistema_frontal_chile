@@ -191,3 +191,98 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
     rows = _fetch_variable_frames(GOES_COLLECTION, GOES_BANDS, "goes_cloud_moisture", 2000, start, end, bbox)
     rows += _fetch_variable_frames(IMERG_COLLECTION, IMERG_BAND, "imerg_precipitation", 10000, start, end, bbox)
     return rows
+
+
+# Regiones (id_region de dpa_limites.dpa_region_subdere) que entran en
+# el bbox de este proyecto: Metropolitana a Los Lagos. Mismo listado
+# usado para calcular REGION_BBOX en el spec, para que la agregacion
+# por comuna y el bbox de los rasters cubran exactamente la misma
+# zona.
+CHOROPLETH_REGION_IDS = (13, 6, 7, 16, 8, 9, 14, 10)
+
+
+def _comuna_features() -> "ee.FeatureCollection":
+    """
+    Lee de Postgres (rol frontal_sur_app, que ya tiene SELECT sobre
+    dpa_comuna_subdere) las geometrias de las comunas dentro de
+    CHOROPLETH_REGION_IDS, y arma una ee.FeatureCollection para usar
+    en reduceRegions. Se hace un join via id_provincia ->
+    dpa_provincia_subdere.id_region porque dpa_comuna_subdere no trae
+    la region directamente.
+
+    Las geometrias van simplificadas (ST_SimplifyPreserveTopology con
+    tolerancia de 0.01 grados, ~1 km) porque las 345 comunas SUBDERE a
+    resolucion completa arman un payload de decenas de MB que supera
+    el limite de request de Earth Engine; a la escala de agregacion de
+    IMERG (10 km por pixel) esa simplificacion no cambia el resultado.
+    """
+    import json
+
+    from sqlalchemy import text
+
+    from db import get_engine
+
+    config = dict(load_config())
+    config["DB_USER"] = config["DB_APP_USER"]
+    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
+
+    with get_engine(config) as engine:
+        with engine.connect() as conn:
+            records = conn.execute(text("""
+                select c.comuna_id,
+                       ST_AsGeoJSON(ST_SimplifyPreserveTopology(c.geometria, 0.01)) as geojson
+                from dpa_limites.dpa_comuna_subdere c
+                join dpa_limites.dpa_provincia_subdere p on p.id_provincia = c.id_provincia
+                where p.id_region = ANY(:region_ids)
+            """), {"region_ids": list(CHOROPLETH_REGION_IDS)}).fetchall()
+
+    features = []
+    for comuna_id, geojson_text in records:
+        geometry = ee.Geometry(json.loads(geojson_text))
+        features.append(ee.Feature(geometry, {"comuna_id": comuna_id}))
+    return ee.FeatureCollection(features)
+
+
+def fetch_choropleth(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
+    """
+    Suma la precipitacion IMERG dentro de [start, end] para cada
+    comuna de CHOROPLETH_REGION_IDS (ee.Reducer.sum() via
+    reduceRegions), y devuelve una fila por comuna lista para
+    frontal_sur.choropleth_stats. bbox se recibe por consistencia de
+    firma con los demas extractores, pero la region real de la
+    agregacion es la union de las geometrias de comuna, no el bbox
+    rectangular.
+
+    valid_time se redondea a la hora en punto: la UNIQUE de
+    choropleth_stats incluye valid_time, y con el datetime.now() crudo
+    del orquestador cada corrida (incluido un reintento del mismo
+    cron) insertaria filas nuevas en vez de upsertear las existentes.
+    """
+    initialize()
+    comunas = _comuna_features()
+
+    imerg_sum = (
+        ee.ImageCollection(IMERG_COLLECTION)
+        .filterDate(start.isoformat(), end.isoformat())
+        .select(IMERG_BAND)
+        .sum()
+    )
+
+    reduced = imerg_sum.reduceRegions(
+        collection=comunas,
+        reducer=ee.Reducer.sum(),
+        scale=10000,
+    ).getInfo()
+
+    valid_time = end.replace(minute=0, second=0, microsecond=0)
+    rows = []
+    for feature in reduced["features"]:
+        properties = feature["properties"]
+        rows.append({
+            "comuna_id": int(properties["comuna_id"]),
+            "variable": "imerg_precipitation",
+            "agg": "sum",
+            "value": float(properties.get("sum", 0.0)),
+            "valid_time": valid_time,
+        })
+    return rows

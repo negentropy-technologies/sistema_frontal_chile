@@ -54,6 +54,10 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA frontal_sur GRANT ALL ON SEQUENCES TO frontal
 
 GRANT USAGE ON SCHEMA dpa_limites TO frontal_sur_app;
 GRANT SELECT ON dpa_limites.dpa_comuna_subdere TO frontal_sur_app;
+-- La agregacion por comuna (extractors/gee.py, fetch_choropleth)
+-- necesita el join comuna -> provincia para filtrar por region,
+-- porque dpa_comuna_subdere no trae la region directamente.
+GRANT SELECT ON dpa_limites.dpa_provincia_subdere TO frontal_sur_app;
 """
 
 

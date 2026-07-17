@@ -25,6 +25,8 @@ ventana), sin Earth Engine.
 """
 
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -47,6 +49,16 @@ HHR_PRODUCT = "GPM_3IMERGHHE.07"
 GRID_RES = 0.1
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "frames" / "nasa_imerg"
+
+# Descargas concurrentes de granulos media-horarios contra GES DISC.
+# ponytail: 3 fijo, suficiente para triplicar el backfill sin ganarse
+# un throttle de NASA; subir solo si GES DISC documenta mas tolerancia.
+HHR_WORKERS = 3
+
+# requests.Session no garantiza thread-safety, asi que cada hilo del
+# pool usa su propia sesion Earthdata (threading.local), conservando
+# ademas su cookie de URS para no repetir el baile OAuth por descarga.
+_thread_locals = threading.local()
 
 # Regiones (id_region de dpa_limites.dpa_region_subdere) que entran en
 # el bbox del proyecto: Metropolitana a Los Lagos. Mismo listado del
@@ -191,8 +203,14 @@ def _fetch_half_hourly(session: EarthdataSession, start: datetime, end: datetime
     recorta y se borra; con el skip de archivos ya recortados, las
     corridas de cron solo bajan los granulos nuevos (~4 horas de
     latencia del Early).
+
+    Los listados de directorio van en serie (son baratos), pero la
+    descarga+recorte de granulos corre con HHR_WORKERS hilos: es puro
+    I/O y en un backfill de 7 dias son ~330 archivos, que en serie
+    tardan el triple.
     """
-    rows = []
+    config = load_config()
+    tasks = []
     day = start.replace(hour=0, minute=0, second=0, microsecond=0)
     while day <= end:
         dir_url = f"{GESDISC_BASE}/{HHR_PRODUCT}/{day.year}/{day.strftime('%j')}/"
@@ -201,21 +219,28 @@ def _fetch_half_hourly(session: EarthdataSession, start: datetime, end: datetime
         for filename in files:
             hora = re.search(r"-S(\d{6})-", filename).group(1)
             valid_time = day.replace(hour=int(hora[:2]), minute=int(hora[2:4]), second=int(hora[4:]))
-            if not (start <= valid_time <= end):
-                continue
-            stamp = valid_time.strftime("%Y%m%dT%H%M%S")
-            tif_path = DATA_DIR / "imerg_early_30min" / f"{stamp}.tif"
-            png_path = DATA_DIR / "imerg_early_30min" / f"{stamp}.png"
-            if not tif_path.exists():
-                global_file = tif_path.parent / filename
-                _download(session, dir_url + filename, global_file)
-                _crop_to_tif(global_file, "HDF5", bbox, tif_path)
-                global_file.unlink()
-            if not png_path.exists():
-                save_png_overlay(tif_path, png_path)
-            rows.append(_row("imerg_early_30min", valid_time, bbox, tif_path, png_path))
+            if start <= valid_time <= end:
+                tasks.append((dir_url + filename, valid_time))
         day += timedelta(days=1)
-    return rows
+
+    def process(task):
+        url, valid_time = task
+        stamp = valid_time.strftime("%Y%m%dT%H%M%S")
+        tif_path = DATA_DIR / "imerg_early_30min" / f"{stamp}.tif"
+        png_path = DATA_DIR / "imerg_early_30min" / f"{stamp}.png"
+        if not tif_path.exists():
+            if not hasattr(_thread_locals, "session"):
+                _thread_locals.session = _session(config)
+            global_file = tif_path.parent / url.rsplit("/", 1)[-1]
+            _download(_thread_locals.session, url, global_file)
+            _crop_to_tif(global_file, "HDF5", bbox, tif_path)
+            global_file.unlink()
+        if not png_path.exists():
+            save_png_overlay(tif_path, png_path)
+        return _row("imerg_early_30min", valid_time, bbox, tif_path, png_path)
+
+    with ThreadPoolExecutor(max_workers=HHR_WORKERS) as pool:
+        return list(pool.map(process, tasks))
 
 
 def _row(variable: str, valid_time: datetime, bbox: tuple, tif_path: Path, png_path: Path) -> dict:

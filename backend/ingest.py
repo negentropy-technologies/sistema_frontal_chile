@@ -20,6 +20,7 @@ import argparse
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import GeneratorType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -31,8 +32,6 @@ from extractors import chirps, dmc, gee, nasa_imerg, noaa_ncei
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
 # Lagos, mas la Zona Economica Exclusiva y Plataforma Continental de
 # dpa_limites.espacio_marino_chile recortada a esa banda de latitud.
-# Ver docs/superpowers/specs/2026-07-16-data-ingestion-design.md para
-# como se calculo.
 REGION_BBOX = (-85.0, -44.5, -69.5, -32.5)
 
 MIN_DAYS = 1
@@ -100,8 +99,11 @@ SOURCES = [
         {"geometria": 4326},
     ),
     (
+        # dmc entrega un generador (un lote de filas por estacion) en
+        # vez de una lista: run() upsertea cada lote apenas llega para
+        # que el pico de memoria no dependa del tamano de la ventana.
         "dmc",
-        lambda start, end: dmc.fetch(start, end, REGION_BBOX),
+        lambda start, end: dmc.fetch_batches(start, end, REGION_BBOX),
         "frontal_sur.station_obs",
         ["source", "variable", "station_id", "valid_time"],
         {"geometria": 4326},
@@ -177,12 +179,23 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
         for name, fetch_fn, table, conflict_cols, geom_cols in SOURCES:
             started_at = datetime.now(timezone.utc)
             try:
-                rows = fetch_fn(start, end)
-                if not dry_run:
-                    upsert(engine, table, rows, conflict_cols, geom_cols)
+                result = fetch_fn(start, end)
+                if isinstance(result, GeneratorType):
+                    # Fuente por lotes (dmc): cada lote se upsertea
+                    # apenas sale del generador, para que el pico de
+                    # memoria sea el de un lote y no el de la ventana.
+                    count = 0
+                    for batch in result:
+                        if not dry_run:
+                            upsert(engine, table, batch, conflict_cols, geom_cols)
+                        count += len(batch)
+                else:
+                    if not dry_run:
+                        upsert(engine, table, result, conflict_cols, geom_cols)
+                    count = len(result)
                 status = "ok"
                 error = None
-                print(f"{name}: {len(rows)} filas" + (" (dry-run, no escrito)" if dry_run else ""))
+                print(f"{name}: {count} filas" + (" (dry-run, no escrito)" if dry_run else ""))
             except Exception as exc:
                 # Se guarda solo el str() de la excepcion: los
                 # extractores no interpolan API keys ni passwords en

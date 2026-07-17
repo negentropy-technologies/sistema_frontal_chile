@@ -138,23 +138,26 @@ def _month_payload(session, config: dict, station_id: str, year: int, month: int
     return payload
 
 
-def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
+def fetch_batches(start: datetime, end: datetime, bbox: tuple):
     """
-    Devuelve una fila por (estacion, variable, momento) con datos no
-    nulos dentro de [start, end] y el bbox, en formato largo para
-    frontal_sur.station_obs. Los momentos vienen en UTC segun la
-    propia API (campo timezone del catalogo).
+    Generador: entrega las filas de station_obs de UNA estacion por
+    iteracion (formato largo, momentos en UTC segun la propia API).
+    El orquestador upsertea cada lote apenas sale, asi el pico de
+    memoria es el de una estacion (~decenas de MB) y no la ventana
+    completa (~1.5 GB en un backfill de 7 dias con las 26 variables);
+    ademas una corrida interrumpida deja persistidas las estaciones ya
+    procesadas.
     """
     stations = _stations_in_bbox(bbox)
     if not stations:
-        return []
+        return
 
     config = load_config()
     session = build_session()
     months = _months(start, end)
-    rows = []
 
     for station in stations:
+        rows = []
         for year, month in months:
             payload = _month_payload(session, config, station["station_id"], year, month)
             time.sleep(PACING_SECONDS)
@@ -189,4 +192,17 @@ def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
                         "unit": unit,
                         "geometria": station["geometria"],
                     })
+        if rows:
+            yield rows
+
+
+def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
+    """
+    Version lista-completa de fetch_batches, para usos puntuales o
+    interactivos. El pipeline usa fetch_batches directamente para no
+    acumular toda la ventana en memoria.
+    """
+    rows = []
+    for batch in fetch_batches(start, end, bbox):
+        rows += batch
     return rows

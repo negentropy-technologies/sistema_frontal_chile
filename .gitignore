@@ -27,3 +27,8 @@ out/
 # Uso local del flujo de brainstorming/planning, no se publica junto
 # con el codigo del proyecto.
 docs/
+
+# --- Credenciales ---
+# OAuth "installed app" de Google Cloud (mismo proyecto de GEE); igual
+# que backend/.env, jamas debe entrar al repositorio.
+backend/secret.json

@@ -25,8 +25,8 @@ import rasterio
 from rasterio.windows import from_bounds
 
 from extractors._http import build_session
+from extractors._raster import save_png_overlay
 from extractors._retry import retry
-from extractors.gee import _save_png_overlay
 
 CHC_BASE_URL = "https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/prelim/sat"
 
@@ -91,7 +91,7 @@ def fetch(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
                 continue
             _crop_day(url, bbox, tif_path)
         if not png_path.exists():
-            _save_png_overlay(tif_path, png_path)
+            save_png_overlay(tif_path, png_path)
 
         rows.append({
             "source": "chirps",

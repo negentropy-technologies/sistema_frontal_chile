@@ -1,15 +1,16 @@
 """
-Extractor de Google Earth Engine para frontal_sur.frames_raster
-(GOES-19 nubosidad/vapor de agua, GPM IMERG precipitacion) y
-frontal_sur.choropleth_stats (IMERG agregado por comuna).
+Extractor de Google Earth Engine para frontal_sur.frames_raster:
+GOES-19 (GOES-East operativo desde 2025, reemplazo de GOES-16, que se
+verifico en vivo el 2026-07-16 con 0 imagenes nuevas en 48 horas),
+Full Disk, cubre Sudamerica. Bandas CMI_C08/C09/C10 (vapor de agua
+alto/medio/bajo) y CMI_C13 (IR limpio, usado para el umbral de nubes
+altas del spec).
 
-Colecciones usadas:
-- NOAA/GOES/19/MCMIPF: GOES-19 (GOES-East operativo desde 2025,
-  reemplazo de GOES-16, que se verifico en vivo el 2026-07-16 con 0
-  imagenes nuevas en 48 horas), Full Disk, cubre Sudamerica. Bandas
-  CMI_C08/C09/C10 (vapor de agua alto/medio/bajo) y CMI_C13 (IR
-  limpio, usado para el umbral de nubes altas del spec).
-- NASA/GPM_L3/IMERG_V07: banda "precipitation" (mm/h).
+GEE queda solo para GOES: IMERG se extrae directo de NASA GES DISC
+(extractors/nasa_imerg.py) por la politica del proyecto de preferir
+la API del emisor original del dato; migrar GOES al bucket publico
+AWS de NOAA (noaa-goes19) queda anotado como siguiente paso, requiere
+reproyectar desde la proyeccion geoestacionaria.
 
 Escalabilidad de la descarga: GOES emite un frame cada 10 minutos
 (cientos por dia, varios MB cada uno). En vez de bajar todos, el
@@ -24,18 +25,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import ee
-import numpy as np
-import rasterio
 import requests
-from PIL import Image
 
 from db import load_config
+from extractors._raster import save_png_overlay
 from extractors._retry import retry
 
 GOES_COLLECTION = "NOAA/GOES/19/MCMIPF"
 GOES_BANDS = ["CMI_C08", "CMI_C09", "CMI_C10", "CMI_C13"]
-IMERG_COLLECTION = "NASA/GPM_L3/IMERG_V07"
-IMERG_BAND = "precipitation"
 
 DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "frames" / "gee"
 
@@ -45,9 +42,8 @@ _initialized = False
 def initialize(config: dict | None = None) -> None:
     """
     Inicializa Earth Engine con las credenciales OAuth ya cacheadas
-    localmente por "earthengine authenticate" (fuente "Validado" del
-    spec: ya se corrio una vez en este entorno). Idempotente dentro
-    del proceso: si ya se inicializo, no vuelve a hacerlo.
+    localmente por "earthengine authenticate". Idempotente dentro del
+    proceso: si ya se inicializo, no vuelve a hacerlo.
     """
     global _initialized
     if _initialized:
@@ -112,197 +108,42 @@ def _download_geotiff(image: "ee.Image", region: "ee.Geometry", dest_path: Path,
     dest_path.write_bytes(response.content)
 
 
-def _save_png_overlay(tif_path: Path, png_path: Path) -> None:
+def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
     """
-    Genera un PNG de vista rapida a partir del GeoTIFF descargado: lee
-    la primera banda, normaliza min-max a 0-255, y guarda en escala de
-    grises. No es el renderizado final del mapa (eso lo decide el
-    plan de webmapping); es un overlay de referencia para verificar
-    visualmente que la descarga funciono.
+    Descarga los frames GOES-19 (nubosidad/vapor de agua + IR) dentro
+    de la ventana [start, end] y el bbox dado, guarda cada uno como
+    GeoTIFF + overlay PNG en data/frames/gee/goes_cloud_moisture/, y
+    devuelve una fila por frame lista para frontal_sur.frames_raster.
+    Los archivos que ya existen en disco no se vuelven a descargar,
+    pero si generan fila igual: el upsert del orquestador es
+    idempotente y asi una corrida interrumpida antes de escribir a la
+    BD se repara sola en la corrida siguiente.
     """
-    with rasterio.open(tif_path) as src:
-        band = src.read(1).astype("float64")
-    finite = band[np.isfinite(band)]
-    if finite.size == 0:
-        normalized = np.zeros_like(band, dtype="uint8")
-    else:
-        band_min, band_max = finite.min(), finite.max()
-        span = band_max - band_min or 1.0
-        normalized = np.clip((band - band_min) / span * 255, 0, 255)
-        normalized = np.nan_to_num(normalized).astype("uint8")
-    png_path.parent.mkdir(parents=True, exist_ok=True)
-    Image.fromarray(normalized, mode="L").save(png_path)
-
-
-def _frame_row(source_variable: str, region_name: str, valid_time: datetime,
-               bbox: tuple, file_path: Path, png_path: Path) -> dict:
-    return {
-        "source": "gee",
-        "variable": source_variable,
-        "region": region_name,
-        "valid_time": valid_time,
-        "bbox": list(bbox),
-        "file_path": str(file_path),
-        "png_overlay_path": str(png_path),
-        "created_at": datetime.now(timezone.utc),
-    }
-
-
-def _fetch_variable_frames(collection_id: str, bands, variable: str, scale: int,
-                           start: datetime, end: datetime, bbox: tuple) -> list[dict]:
-    """
-    Descarga los frames de una coleccion/variable dentro de la ventana
-    y bbox dados (un frame por hora, ver _hourly_images), y devuelve
-    una fila por frame para frontal_sur.frames_raster. Los archivos
-    que ya existen en disco no se vuelven a descargar, pero si generan
-    fila igual: el upsert del orquestador es idempotente y asi una
-    corrida interrumpida antes de escribir a la BD se repara sola en
-    la corrida siguiente.
-    """
+    initialize()
     region = ee.Geometry.Rectangle(list(bbox))
     collection = (
-        ee.ImageCollection(collection_id)
+        ee.ImageCollection(GOES_COLLECTION)
         .filterDate(start.isoformat(), end.isoformat())
         .filterBounds(region)
-        .select(bands)
+        .select(GOES_BANDS)
     )
     rows = []
     for image, valid_time in _hourly_images(collection):
         stamp = valid_time.strftime("%Y%m%dT%H%M%S")
-        tif_path = DATA_DIR / variable / f"{stamp}.tif"
-        png_path = DATA_DIR / variable / f"{stamp}.png"
+        tif_path = DATA_DIR / "goes_cloud_moisture" / f"{stamp}.tif"
+        png_path = DATA_DIR / "goes_cloud_moisture" / f"{stamp}.png"
         if not tif_path.exists():
-            _download_geotiff(image, region, tif_path, scale=scale)
+            _download_geotiff(image, region, tif_path, scale=2000)
         if not png_path.exists():
-            _save_png_overlay(tif_path, png_path)
-        rows.append(_frame_row(variable, "centro_sur", valid_time, bbox, tif_path, png_path))
-    return rows
-
-
-def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
-    """
-    Descarga los frames GOES-19 (nubosidad/vapor de agua + IR) y GPM
-    IMERG (precipitacion) dentro de la ventana [start, end] y el bbox
-    dado, guarda cada uno como GeoTIFF + overlay PNG en
-    data/frames/gee/<variable>/, y devuelve una fila por frame lista
-    para frontal_sur.frames_raster.
-    """
-    initialize()
-    rows = _fetch_variable_frames(GOES_COLLECTION, GOES_BANDS, "goes_cloud_moisture", 2000, start, end, bbox)
-    rows += _fetch_variable_frames(IMERG_COLLECTION, IMERG_BAND, "imerg_precipitation", 10000, start, end, bbox)
-    return rows
-
-
-# Regiones (id_region de dpa_limites.dpa_region_subdere) que entran en
-# el bbox de este proyecto: Metropolitana a Los Lagos. Mismo listado
-# usado para calcular REGION_BBOX en el spec, para que la agregacion
-# por comuna y el bbox de los rasters cubran exactamente la misma
-# zona.
-CHOROPLETH_REGION_IDS = (13, 6, 7, 16, 8, 9, 14, 10)
-
-# Cache de proceso para las geometrias de comuna: el orquestador llama
-# fetch_choropleth tres veces por corrida (ventanas 24h/72h/7d) y las
-# comunas no cambian entre llamadas; sin esto se abririan tres tuneles
-# SSH a la BD por corrida.
-_comuna_cache = None
-
-
-def _comuna_features() -> "ee.FeatureCollection":
-    """
-    Lee de Postgres (rol frontal_sur_app, que ya tiene SELECT sobre
-    dpa_comuna_subdere) las geometrias de las comunas dentro de
-    CHOROPLETH_REGION_IDS, y arma una ee.FeatureCollection para usar
-    en reduceRegions. Se hace un join via id_provincia ->
-    dpa_provincia_subdere.id_region porque dpa_comuna_subdere no trae
-    la region directamente.
-
-    Las geometrias van simplificadas (ST_SimplifyPreserveTopology con
-    tolerancia de 0.01 grados, ~1 km) porque las 345 comunas SUBDERE a
-    resolucion completa arman un payload de decenas de MB que supera
-    el limite de request de Earth Engine; a la escala de agregacion de
-    IMERG (10 km por pixel) esa simplificacion no cambia el resultado.
-    """
-    global _comuna_cache
-    if _comuna_cache is not None:
-        return _comuna_cache
-
-    import json
-
-    from sqlalchemy import text
-
-    from db import get_engine
-
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-
-    with get_engine(config) as engine:
-        with engine.connect() as conn:
-            records = conn.execute(text("""
-                select c.comuna_id,
-                       ST_AsGeoJSON(ST_SimplifyPreserveTopology(c.geometria, 0.01)) as geojson
-                from dpa_limites.dpa_comuna_subdere c
-                join dpa_limites.dpa_provincia_subdere p on p.id_provincia = c.id_provincia
-                where p.id_region = ANY(:region_ids)
-            """), {"region_ids": list(CHOROPLETH_REGION_IDS)}).fetchall()
-
-    features = []
-    for comuna_id, geojson_text in records:
-        geometry = ee.Geometry(json.loads(geojson_text))
-        features.append(ee.Feature(geometry, {"comuna_id": comuna_id}))
-    _comuna_cache = ee.FeatureCollection(features)
-    return _comuna_cache
-
-
-def fetch_choropleth(start: datetime, end: datetime, bbox: tuple,
-                     variable: str = "imerg_precipitation") -> list[dict]:
-    """
-    Suma la precipitacion IMERG dentro de [start, end] para cada
-    comuna de CHOROPLETH_REGION_IDS (ee.Reducer.sum() via
-    reduceRegions), y devuelve una fila por comuna lista para
-    frontal_sur.choropleth_stats. bbox se recibe por consistencia de
-    firma con los demas extractores, pero la region real de la
-    agregacion es la union de las geometrias de comuna, no el bbox
-    rectangular.
-
-    valid_time se redondea a la hora en punto: la UNIQUE de
-    choropleth_stats incluye valid_time, y con el datetime.now() crudo
-    del orquestador cada corrida (incluido un reintento del mismo
-    cron) insertaria filas nuevas en vez de upsertear las existentes.
-    """
-    initialize()
-
-    window = (
-        ee.ImageCollection(IMERG_COLLECTION)
-        .filterDate(start.isoformat(), end.isoformat())
-        .select(IMERG_BAND)
-    )
-    # IMERG llega al catalogo de GEE con ~24 horas de retraso, asi que
-    # una ventana corta puede venir vacia; sum() sobre una coleccion
-    # vacia produce una imagen sin bandas y reduceRegions falla con
-    # "Image has no bands". Se corta aqui antes de abrir el tunel a la
-    # BD (que solo hace falta para leer las comunas).
-    if window.size().getInfo() == 0:
-        return []
-
-    comunas = _comuna_features()
-    imerg_sum = window.sum()
-
-    reduced = imerg_sum.reduceRegions(
-        collection=comunas,
-        reducer=ee.Reducer.sum(),
-        scale=10000,
-    ).getInfo()
-
-    valid_time = end.replace(minute=0, second=0, microsecond=0)
-    rows = []
-    for feature in reduced["features"]:
-        properties = feature["properties"]
+            save_png_overlay(tif_path, png_path)
         rows.append({
-            "comuna_id": int(properties["comuna_id"]),
-            "variable": variable,
-            "agg": "sum",
-            "value": float(properties.get("sum", 0.0)),
+            "source": "gee",
+            "variable": "goes_cloud_moisture",
+            "region": "centro_sur",
             "valid_time": valid_time,
+            "bbox": list(bbox),
+            "file_path": str(tif_path),
+            "png_overlay_path": str(png_path),
+            "created_at": datetime.now(timezone.utc),
         })
     return rows

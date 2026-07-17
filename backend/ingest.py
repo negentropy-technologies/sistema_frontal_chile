@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
-from extractors import chirps, dmc, gee, noaa_ncei
+from extractors import chirps, dmc, gee, nasa_imerg, noaa_ncei
 
 # Unica fuente de verdad geografica del proyecto: Metropolitana a Los
 # Lagos, mas la Zona Economica Exclusiva y Plataforma Continental de
@@ -58,7 +58,7 @@ def _fetch_choropleth_windows(start: datetime, end: datetime) -> list[dict]:
     """
     rows = []
     for days, variable in CHOROPLETH_WINDOWS:
-        rows += gee.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX, variable=variable)
+        rows += nasa_imerg.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX, variable=variable)
     return rows
 
 
@@ -67,14 +67,21 @@ def _fetch_choropleth_windows(start: datetime, end: datetime) -> list[dict]:
 # el resultado de cada una por separado.
 SOURCES = [
     (
-        "gee_frames",
+        "gee_goes",
         lambda start, end: gee.fetch_frames(start, end, REGION_BBOX),
         "frontal_sur.frames_raster",
         ["source", "variable", "region", "valid_time"],
         None,
     ),
     (
-        "gee_choropleth",
+        "nasa_imerg",
+        lambda start, end: nasa_imerg.fetch_frames(start, end, REGION_BBOX),
+        "frontal_sur.frames_raster",
+        ["source", "variable", "region", "valid_time"],
+        None,
+    ),
+    (
+        "imerg_choropleth",
         _fetch_choropleth_windows,
         "frontal_sur.choropleth_stats",
         ["comuna_id", "variable", "agg", "valid_time"],

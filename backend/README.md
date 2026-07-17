@@ -55,16 +55,26 @@ Fuentes activas:
 
 | Fuente | Destino | Latencia | Nota |
 |---|---|---|---|
-| `gee_frames` (GOES-19 + GPM IMERG) | `frames_raster` + GeoTIFF/PNG en `data/frames/gee/` | GOES ~30 min, IMERG ~24 h | 1 frame por hora, recortado al bbox |
-| `gee_choropleth` (IMERG por comuna) | `choropleth_stats` | ~24 h | ventanas fijas 24h/72h/7d |
-| `noaa_ncei` (estaciones GHCND) | `station_obs` | meses | contexto historico, no near real time |
-| `dmc` (red EMA) | `station_obs` | minutos | 7 variables por estacion, pacing de 0.3 s entre llamadas |
-| `chirps` (CHIRPS v3.0 prelim) | `frames_raster` + `chirps_raster` (postgis_raster) | ~7 dias | recorte por rango HTTP, sin bajar el tif global |
+| `gee_goes` (GOES-19 via GEE) | `frames_raster` + GeoTIFF/PNG en `data/frames/gee/` | ~30 min | 1 frame por hora, recortado al bbox |
+| `nasa_imerg` (GPM IMERG Early, GES DISC directo) | `frames_raster` + `data/frames/nasa_imerg/` | diario ~1 dia, 30 min ~4 h | auth Earthdata; el global se borra tras recortar |
+| `imerg_choropleth` (IMERG diario por comuna, rasterio) | `choropleth_stats` | ~1 dia | ventanas fijas 24h/72h/7d, sin Earth Engine |
+| `noaa_ncei` (estaciones GHCND) | `station_obs` | meses | acotado a los ultimos 7 dias de la ventana |
+| `dmc` (red EMA) | `station_obs` | minutos | todas las variables del endpoint, pacing de 0.3 s |
+| `chirps` (CHIRPS v3.0 prelim, CHC directo) | `frames_raster` + `data/frames/chirps/` | ~7 dias | recorte por rango HTTP, sin bajar el tif global |
 
-Convenciones: toda columna de geometria se llama `geometria` (o
-`geometria_<rol>`) y va al final de la tabla; el bbox del proyecto
-(`REGION_BBOX` en `ingest.py`, RM a Los Lagos + ZEE) es la unica
-fuente de verdad geografica y se pasa por parametro a cada extractor.
+Politica de fuentes: API directa del emisor original del dato antes
+que intermediarios. IMERG ya migro de GEE a NASA GES DISC; GOES queda
+en GEE como excepcion temporal (migrar al bucket publico AWS de NOAA
+requiere reproyectar desde la proyeccion geoestacionaria, pendiente).
+ClimateSERV se evaluo y descarto: solo tiene CHIRPS v2 y su IMERG
+devuelve vacio (verificado en vivo el 2026-07-17).
+
+Almacenamiento: TODOS los rasters viven en disco (`data/frames/`) y
+se serviran con un tiler u overlays PNG; la BD solo guarda metadatos
+(`frames_raster`) y vectores. Convenciones: toda columna de geometria
+se llama `geometria` (o `geometria_<rol>`) y va al final de la tabla;
+el bbox del proyecto (`REGION_BBOX` en `ingest.py`, RM a Los Lagos +
+ZEE) es la unica fuente de verdad geografica.
 
 Fuera del pipeline por ahora: Google Flood Hub (waitlist de Google
 pendiente), MSWEP (requiere registro en GloH2O y acceso a su Drive),
@@ -97,12 +107,14 @@ Sin pytest: cada archivo en `backend/tests/` corre con `assert` plano.
 .venv/bin/python backend/tests/test_role.py
 .venv/bin/python backend/tests/test_retry.py
 .venv/bin/python backend/tests/test_http.py
+.venv/bin/python backend/tests/test_dmc.py
 .venv/bin/python backend/tests/test_noaa_ncei.py
 .venv/bin/python backend/tests/test_gee.py
+.venv/bin/python backend/tests/test_nasa_imerg.py
 .venv/bin/python backend/tests/test_chirps.py
 .venv/bin/python backend/tests/test_ingest.py
 ```
 
-Los tests de `noaa_ncei`, `gee`, `chirps` e `ingest` (parcialmente)
-llaman a APIs externas reales o a la BD real con el rol acotado
-`frontal_sur_app`; no hay mocks en este proyecto.
+Los tests de `noaa_ncei`, `gee`, `nasa_imerg`, `chirps` e `ingest`
+(parcialmente) llaman a APIs externas reales o a la BD real con el rol
+acotado `frontal_sur_app`; no hay mocks en este proyecto.

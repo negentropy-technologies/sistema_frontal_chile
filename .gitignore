@@ -22,6 +22,7 @@ backend/.env
 # ingest.py).
 data/
 out/
+backend/logs/
 
 # --- Documentacion interna de trabajo (specs y planes de superpowers) ---
 # Uso local del flujo de brainstorming/planning, no se publica junto

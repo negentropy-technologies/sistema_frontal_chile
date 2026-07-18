@@ -1,6 +1,15 @@
 -- Migracion inicial del esquema frontal_sur: crea el esquema, la
 -- extension PostGIS (si no existe ya en esta base de datos compartida)
--- y las 5 tablas del modelo de datos del spec.
+-- y las tablas transversales del sistema. Las tablas por fuente de
+-- estaciones (DMC, Agromet, DGA) viven en sus propias migraciones.
+--
+-- Convenciones del proyecto:
+-- - Toda columna de geometria se llama "geometria" (o
+--   "geometria_<rol>" si una tabla tiene mas de una) y va al final de
+--   la tabla, igual que en dpa_limites.dpa_comuna_subdere.
+-- - TODOS los rasters viven en disco (data/frames/) y se sirven con
+--   un tiler u overlays PNG; la base de datos solo guarda metadatos
+--   (frames_raster) y vectores.
 
 CREATE SCHEMA IF NOT EXISTS frontal_sur;
 
@@ -21,7 +30,9 @@ CREATE TABLE IF NOT EXISTS frontal_sur.ingest_runs (
 -- especifico. file_path apunta al raster original (ej GeoTIFF) y
 -- png_overlay_path a una version PNG ya reproyectada para overlay en
 -- el mapa web. La UNIQUE evita duplicar el mismo frame si el pipeline
--- de ingesta se corre mas de una vez sobre el mismo periodo.
+-- de ingesta se corre mas de una vez sobre el mismo periodo. La
+-- geometria es una columna generada desde el array bbox (xmin, ymin,
+-- xmax, ymax): se calcula sola y el pipeline no necesita escribirla.
 CREATE TABLE IF NOT EXISTS frontal_sur.frames_raster (
     id SERIAL PRIMARY KEY,
     source TEXT NOT NULL,
@@ -32,42 +43,11 @@ CREATE TABLE IF NOT EXISTS frontal_sur.frames_raster (
     file_path TEXT,
     png_overlay_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    geometria geometry(Polygon, 4326)
+        GENERATED ALWAYS AS (ST_MakeEnvelope(bbox[1], bbox[2], bbox[3], bbox[4], 4326)) STORED,
     UNIQUE (source, variable, region, valid_time)
 );
-
--- station_id es TEXT: los codigos de estacion de DMC y NOAA/NCEI son
--- alfanumericos (ejemplo: ids GHCN tipo "CIM00085766"), no enteros.
-CREATE TABLE IF NOT EXISTS frontal_sur.station_obs (
-    id SERIAL PRIMARY KEY,
-    source TEXT NOT NULL,
-    station_id TEXT NOT NULL,
-    station_name TEXT,
-    geom geometry(Point, 4326) NOT NULL,
-    valid_time TIMESTAMPTZ NOT NULL,
-    variable TEXT NOT NULL,
-    value DOUBLE PRECISION,
-    unit TEXT,
-    UNIQUE (source, variable, station_id, valid_time)
-);
-CREATE INDEX IF NOT EXISTS station_obs_geom_idx ON frontal_sur.station_obs USING GIST (geom);
-
--- inundation_polygon es nullable: no todos los gauges de Flood Hub
--- traen mapa de inundacion (floodStatus.inundationMapSet es opcional
--- en la API de Flood Hub).
-CREATE TABLE IF NOT EXISTS frontal_sur.flood_status (
-    id SERIAL PRIMARY KEY,
-    gauge_id TEXT NOT NULL,
-    geom_point geometry(Point, 4326) NOT NULL,
-    inundation_polygon geometry(MultiPolygon, 4326),
-    severity TEXT,
-    issued_time TIMESTAMPTZ NOT NULL,
-    forecast_trend TEXT,
-    forecast_change TEXT,
-    source TEXT NOT NULL,
-    UNIQUE (gauge_id, issued_time)
-);
-CREATE INDEX IF NOT EXISTS flood_status_point_idx ON frontal_sur.flood_status USING GIST (geom_point);
-CREATE INDEX IF NOT EXISTS flood_status_polygon_idx ON frontal_sur.flood_status USING GIST (inundation_polygon);
+CREATE INDEX IF NOT EXISTS frames_raster_geometria_idx ON frontal_sur.frames_raster USING GIST (geometria);
 
 -- comuna_id referencia la tabla de comunas SUBDERE ya existente en
 -- esta base de datos compartida (dpa_limites.dpa_comuna_subdere, con

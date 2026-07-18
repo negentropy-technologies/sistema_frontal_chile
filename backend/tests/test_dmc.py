@@ -20,8 +20,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dmc_stations import reparar_encoding
 from extractors.dmc import COLUMNAS, _months, _numeric
 
-MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0008_dmc_datos_tablon.sql"
-DICCIONARIO = Path(__file__).resolve().parent.parent / "migrations" / "0009_dmc_variables_diccionario.sql"
+MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0002_dmc.sql"
+DICCIONARIO = Path(__file__).resolve().parent.parent / "migrations" / "0002_dmc.sql"
 
 
 def test_months_within_one_month():
@@ -50,14 +50,14 @@ def test_numeric():
 def test_columnas_sincronizadas_con_migracion():
     ddl = MIGRATION.read_text()
     for column in COLUMNAS.values():
-        assert f"    {column} DOUBLE PRECISION" in ddl, f"columna {column} falta en la migracion 0008"
+        assert f"    {column} DOUBLE PRECISION" in ddl, f"columna {column} falta en la migracion 0002"
 
 
 def test_columnas_sincronizadas_con_diccionario():
     ddl = DICCIONARIO.read_text()
     for field, column in COLUMNAS.items():
-        assert f"('{column}', " in ddl, f"variable {column} falta en el diccionario 0009"
-        assert f", '{field}')" in ddl, f"campo_endpoint {field} falta en el diccionario 0009"
+        assert f"('{column}', " in ddl, f"variable {column} falta en el diccionario de 0002"
+        assert f", '{field}')" in ddl, f"campo_endpoint {field} falta en el diccionario de 0002"
 
 
 def test_reparar_encoding():

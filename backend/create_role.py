@@ -58,6 +58,12 @@ GRANT SELECT ON dpa_limites.dpa_comuna_subdere TO frontal_sur_app;
 -- necesita el join comuna -> provincia para filtrar por region,
 -- porque dpa_comuna_subdere no trae la region directamente.
 GRANT SELECT ON dpa_limites.dpa_provincia_subdere TO frontal_sur_app;
+-- Regiones para el fondo de los mapas (notebook de animaciones y el
+-- futuro frontend) y el poligono del espacio marino de Chile, util
+-- para encuadres y recortes hacia el Mar Presencial. Aplicados a mano
+-- el 2026-07-18; quedan aca para que el rol se pueda recrear completo.
+GRANT SELECT ON dpa_limites.dpa_region_subdere TO frontal_sur_app;
+GRANT SELECT ON dpa_limites.espacio_marino_chile TO frontal_sur_app;
 """
 
 

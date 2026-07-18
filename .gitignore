@@ -21,6 +21,7 @@ backend/.env
 # pipeline de ingesta (no son codigo fuente, se regeneran corriendo
 # ingest.py).
 data/
+notebooks/
 out/
 backend/logs/
 

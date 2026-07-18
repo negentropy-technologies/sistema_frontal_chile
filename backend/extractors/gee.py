@@ -265,7 +265,13 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
             tif_path = DATA_DIR / variable / f"{stamp}.tif"
             png_path = DATA_DIR / variable / f"{stamp}.png"
             if not tif_path.exists():
-                _download_geotiff(_scaled(image, bands), region, tif_path, scale=2000)
+                # scale 3000 (no 2000): con el bbox Coquimbo-Magallanes
+                # la peticion de 4 bandas a 2000 m pide ~103 MB y GEE
+                # rechaza sobre 48 MB; a 3000 m queda en ~46 MB. Sobre
+                # Chile la resolucion efectiva de GOES-East ya es >3 km
+                # por el angulo de vista, asi que no se pierde detalle
+                # real.
+                _download_geotiff(_scaled(image, bands), region, tif_path, scale=3000)
                 log(f"goes {variable} {stamp}: descargado")
             else:
                 log(f"goes {variable} {stamp}: ya existia en disco")

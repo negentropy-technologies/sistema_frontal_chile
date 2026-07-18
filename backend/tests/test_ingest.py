@@ -47,7 +47,7 @@ def test_upsert_is_idempotent():
         "variable": "test_variable",
         "region": "test_region",
         "valid_time": datetime(2000, 1, 1, tzinfo=timezone.utc),
-        "bbox": [-118.5, -44.5, -69.5, -32.5],
+        "bbox": [-118.5, -57.0, -65.5, -28.5],
         "file_path": "/tmp/test_ingest.tif",
         "png_overlay_path": "/tmp/test_ingest.png",
         "created_at": datetime(2000, 1, 1, tzinfo=timezone.utc),

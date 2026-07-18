@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from extractors.gee import fetch_frames
 
-REGION_BBOX = (-118.5, -44.5, -69.5, -32.5)
+REGION_BBOX = (-118.5, -57.0, -65.5, -28.5)
 
 
 def test_fetch_frames_returns_well_shaped_rows():

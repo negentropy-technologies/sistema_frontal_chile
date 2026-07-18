@@ -27,19 +27,28 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
-from extractors import chirps, dmc, gee, nasa_imerg
+from extractors import agromet, chirps, dga, dmc, gee, nasa_imerg
 from logutil import log
 
-# Unica fuente de verdad geografica del proyecto: Metropolitana a Los
-# Lagos, mas TODOS los espacios marinos de
-# dpa_limites.espacio_marino_chile recortados a esa banda de latitud.
-# El limite oeste lo fija el Mar Presencial (lon -118.0 medido en la
-# BD el 2026-07-17; la ZEE sola llegaba a -84.8), redondeado con
-# margen chico a -118.5.
-REGION_BBOX = (-118.5, -44.5, -69.5, -32.5)
+# Unica fuente de verdad geografica del proyecto: Coquimbo a
+# Magallanes (ampliado el 2026-07-18; el bbox anterior Metropolitana a
+# Los Lagos dejaba los sistemas frontales cortados en los bordes), mas
+# TODOS los espacios marinos de dpa_limites.espacio_marino_chile
+# recortados a esa banda de latitud. Limites medidos en la BD el
+# 2026-07-18 con ST_Extent y redondeados con margen chico: norte
+# Coquimbo lat -29.037; sur Magallanes lat -56.538; este el mas
+# oriental entre Magallanes (lon -66.416) y la Zona Contigua en el
+# lado atlantico austral (lon -65.770); el oeste lo sigue fijando el
+# Mar Presencial (lon -118.0 medido el 2026-07-17; la ZEE sola llegaba
+# a -84.8).
+REGION_BBOX = (-118.5, -57.0, -65.5, -28.5)
 
 MIN_DAYS = 1
 MAX_DAYS = 90
+# Ventana por defecto del pipeline cuando no se pasa --days ni
+# --start/--end. Unico lugar donde vive ese numero: todo lo demas se
+# deriva de la ventana [start, end] que arma main().
+DEFAULT_DAYS = 7
 
 # Ventanas de acumulacion de precipitacion por comuna definidas en la
 # tabla de productos del spec general (coropletas 24h/72h/7d). Son
@@ -97,7 +106,7 @@ SOURCES = [
     # NOAA NCEI se retiro del sistema el 2026-07-17: GHCND publica las
     # estaciones chilenas con ~1 anio de retraso, incompatible con
     # monitoreo near real time; el contexto de estaciones lo cubre la
-    # DMC. Ver migracion 0011 y el historial de git si se retoma.
+    # DMC. Ver el historial de git si se retoma.
     (
         # dmc escribe el tablon ancho dmc_datos (una columna por
         # variable, FK ema_id al catalogo; la geometria no se repite
@@ -108,6 +117,27 @@ SOURCES = [
         lambda start, end, engine: dmc.fetch_batches(start, end, REGION_BBOX, engine),
         "frontal_sur.dmc_datos",
         ["ema_id", "momento"],
+        None,
+    ),
+    (
+        # agromet escribe su tablon agromet_datos (mismo patron que
+        # dmc: generador con un lote por estacion, FK ema_id al
+        # catalogo, columnas normalizadas del diccionario unificado).
+        "agromet",
+        lambda start, end, engine: agromet.fetch_batches(start, end, REGION_BBOX, engine),
+        "frontal_sur.agromet_datos",
+        ["ema_id", "momento"],
+        None,
+    ),
+    (
+        # dga escribe su tablon dga_datos (mismo patron que dmc y
+        # agromet: generador con un lote por estacion, FK estacion_id
+        # al catalogo dga_stations, una columna por parametro
+        # instantaneo de dgasat).
+        "dga",
+        lambda start, end, engine: dga.fetch_batches(start, end, REGION_BBOX, engine),
+        "frontal_sur.dga_datos",
+        ["estacion_id", "momento"],
         None,
     ),
     (
@@ -166,7 +196,7 @@ def parse_date(raw: str) -> datetime:
         raise ValueError(f"la fecha debe ser YYYY-MM-DD, se recibio {raw!r}")
 
 
-def run(start: datetime, end: datetime, dry_run: bool) -> None:
+def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None) -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -177,8 +207,19 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
     """
     config = _app_role_config()
 
+    # Con "sources" se corre solo el subconjunto pedido, para relanzar
+    # fuentes puntuales (por ejemplo tras un corte de la base) sin
+    # repetir las que ya terminaron ok en la misma ventana.
+    seleccion = SOURCES
+    if sources is not None:
+        conocidas = {name for name, *_ in SOURCES}
+        desconocidas = set(sources) - conocidas
+        if desconocidas:
+            raise ValueError(f"fuentes desconocidas: {sorted(desconocidas)}; validas: {sorted(conocidas)}")
+        seleccion = [s for s in SOURCES if s[0] in sources]
+
     with get_engine(config) as engine:
-        for name, fetch_fn, table, conflict_cols, geom_cols in SOURCES:
+        for name, fetch_fn, table, conflict_cols, geom_cols in seleccion:
             started_at = datetime.now(timezone.utc)
             log(f"== fuente {name}: inicio (ventana {start:%Y-%m-%d %H:%M} a {end:%Y-%m-%d %H:%M} UTC)")
             try:
@@ -227,10 +268,11 @@ def run(start: datetime, end: datetime, dry_run: bool) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Orquestador de ingesta de frontal_sur")
-    parser.add_argument("--days", default="7", help=f"ventana en dias hacia atras desde ahora, entre {MIN_DAYS} y {MAX_DAYS} (default: 7)")
+    parser.add_argument("--days", default=str(DEFAULT_DAYS), help=f"ventana en dias hacia atras desde ahora, entre {MIN_DAYS} y {MAX_DAYS} (default: {DEFAULT_DAYS})")
     parser.add_argument("--start", default=None, help="fecha inicial YYYY-MM-DD (extraccion por fechas definidas; requiere --end)")
     parser.add_argument("--end", default=None, help="fecha final YYYY-MM-DD (con --start)")
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
+    parser.add_argument("--sources", default=None, help="lista separada por comas para correr solo esas fuentes (ej: dga,chirps); default: todas")
     args = parser.parse_args()
 
     # Dos modos de ventana: --days (relativa al presente, para el cron)
@@ -248,7 +290,8 @@ def main() -> None:
         end = datetime.now(timezone.utc)
         start = end - timedelta(days=days)
 
-    run(start=start, end=end, dry_run=args.dry_run)
+    sources = args.sources.split(",") if args.sources else None
+    run(start=start, end=end, dry_run=args.dry_run, sources=sources)
 
 
 if __name__ == "__main__":

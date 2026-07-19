@@ -25,6 +25,11 @@ en GEE con el mismo rango de anios) porque el proyecto prioriza la API
 del emisor original del dato salvo que no alcance en cobertura o
 resolucion -- mismo criterio que ya documentan extractors/chirps.py y
 extractors/gee.py.
+
+La descarga y el recorte por rango HTTP viven en extractors/_chc.py,
+compartido con chirps.py: mismo servidor y mismo formato de archivo
+para las ramas prelim y final, solo cambia la carpeta y el infix del
+nombre de archivo.
 """
 
 from datetime import datetime
@@ -32,13 +37,13 @@ from pathlib import Path
 
 import numpy as np
 import rasterio
-from rasterio.windows import from_bounds
 
+from extractors._chc import crop_day, day_url
 from extractors._http import build_session
-from extractors._retry import retry
 from logutil import log
 
-CHC_FINAL_BASE_URL = "https://data.chc.ucsb.edu/products/CHIRPS/v3.0/daily/final/sat"
+CLIMATOLOGY_BRANCH = "final/sat"
+CLIMATOLOGY_INFIX = "sat"
 
 # Verificado en vivo el 2026-07-19 contra data.chc.ucsb.edu: 1998 es
 # el primer anio con archivos reales en la rama final/sat (arranca con
@@ -69,36 +74,7 @@ def validar_years_disponibles(first_year: int, last_year: int) -> None:
 
 
 def _day_url(year: int, month: int, day: int) -> str:
-    return f"{CHC_FINAL_BASE_URL}/{year}/chirps-v3.0.sat.{year}.{month:02d}.{day:02d}.tif"
-
-
-@retry(times=3, backoff_seconds=2.0, exceptions=(rasterio.errors.RasterioIOError,))
-def _crop_day(url: str, bbox: tuple, dest_path: Path) -> None:
-    """
-    Recorta por rango HTTP (vsicurl) solo la ventana del bbox del
-    GeoTIFF global remoto, igual que extractors/chirps.py::_crop_day.
-    Duplicado deliberadamente (no importado desde chirps.py): son
-    modulos de fuentes distintas (prelim vs final) que el proyecto
-    mantiene desacoplados, mismo criterio que dga/dmc/agromet con
-    _skip_to_resume.
-    """
-    xmin, ymin, xmax, ymax = bbox
-    with rasterio.open(url) as src:
-        window = from_bounds(xmin, ymin, xmax, ymax, src.transform)
-        data = src.read(1, window=window).astype("float32")
-        nodata = src.nodata if src.nodata is not None else -9999.0
-        data[data == nodata] = np.nan
-        profile = src.profile.copy()
-        profile.update(
-            width=data.shape[1],
-            height=data.shape[0],
-            transform=src.window_transform(window),
-            dtype="float32",
-            nodata=np.nan,
-        )
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    with rasterio.open(dest_path, "w", **profile) as dst:
-        dst.write(data, 1)
+    return day_url(CLIMATOLOGY_BRANCH, CLIMATOLOGY_INFIX, year, month, day)
 
 
 def climatology_for_dayofyear(
@@ -133,7 +109,7 @@ def climatology_for_dayofyear(
             if session.head(url, timeout=20).status_code == 404:
                 log(f"chirps_climatology {year}-{month:02d}-{day:02d}: no publicado, se salta")
                 continue
-            _crop_day(url, bbox, dest_path)
+            crop_day(url, bbox, dest_path)
             log(f"chirps_climatology {year}-{month:02d}-{day:02d}: recortado por rango HTTP")
         with rasterio.open(dest_path) as src:
             capas.append(src.read(1).astype("float64"))

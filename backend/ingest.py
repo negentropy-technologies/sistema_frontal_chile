@@ -48,6 +48,12 @@ REGION_BBOX = (-118.5, -57.0, -65.5, -28.5)
 
 MIN_DAYS = 1
 MAX_DAYS = 90
+
+# Techo de workers concurrentes para dga (ver extractors/dga.py):
+# verificado en vivo el 2026-07-19 que dgasat tolera 4 sesiones
+# simultaneas limpio, pero con 10 devuelve 500 en el 100% de los
+# casos. No subir sin volver a probar en vivo primero.
+MAX_DGA_WORKERS = 4
 # Ventana por defecto del pipeline cuando no se pasa --days ni
 # --start/--end. Unico lugar donde vive ese numero: todo lo demas se
 # deriva de la ventana [start, end] que arma main().
@@ -321,6 +327,22 @@ def parse_days(raw: str) -> int:
     return days
 
 
+def parse_workers(raw: str) -> int:
+    """
+    Valida --workers como entero entre 1 y MAX_DGA_WORKERS. Mismo
+    criterio que parse_days: input externo, se valida antes de
+    llegar a dga.fetch_batches para no repetir por error la corrida
+    de 10 workers que devolvio 500 en el 100% de los casos.
+    """
+    try:
+        workers = int(raw)
+    except ValueError:
+        raise ValueError(f"--workers debe ser un entero, se recibio {raw!r}")
+    if not (1 <= workers <= MAX_DGA_WORKERS):
+        raise ValueError(f"--workers debe estar entre 1 y {MAX_DGA_WORKERS}, se recibio {workers}")
+    return workers
+
+
 def _app_role_config() -> dict:
     """
     Arma la config de conexion con el rol acotado frontal_sur_app en
@@ -346,7 +368,7 @@ def parse_date(raw: str) -> datetime:
 
 
 def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None,
-        resume_after: str | None = None) -> None:
+        resume_after: str | None = None, workers: int = 1) -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -365,6 +387,13 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
     imerg_choropleth y chirps no tienen este mecanismo: piden toda la
     ventana en una sola llamada (no hay "estacion por estacion" que
     retomar) y una corrida cortada se relanza completa.
+
+    workers solo aplica a dga (unica fuente con soporte de scraping
+    concurrente por ahora, ver extractors/dga.py::fetch_batches):
+    verificado en vivo el 2026-07-19 que 4 workers corren limpios
+    contra dgasat pero 10 hacen que el portal devuelva 500 en el 100%
+    de los casos. dmc y agromet ignoran este parametro (todavia
+    secuenciales).
     """
     config = _app_role_config()
 
@@ -379,14 +408,22 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
             raise ValueError(f"fuentes desconocidas: {sorted(desconocidas)}; validas: {sorted(conocidas)}")
         seleccion = [s for s in SOURCES if s[0] in sources]
 
-    if resume_after is not None:
+    if resume_after is not None or workers != 1:
         modulo_por_fuente = {"dga": dga, "dmc": dmc, "agromet": agromet}
+
+        def _con_resume_y_workers(name, fetch_fn):
+            if name not in modulo_por_fuente:
+                return fetch_fn
+            mod = modulo_por_fuente[name]
+            kwargs = {}
+            if resume_after is not None:
+                kwargs["resume_after"] = resume_after
+            if workers != 1 and name == "dga":
+                kwargs["workers"] = workers
+            return lambda s, e, en, mod=mod, kwargs=kwargs: mod.fetch_batches(s, e, REGION_BBOX, en, **kwargs)
+
         seleccion = [
-            (name,
-             (lambda s, e, en, mod=modulo_por_fuente[name], ra=resume_after:
-                 mod.fetch_batches(s, e, REGION_BBOX, en, resume_after=ra))
-             if name in modulo_por_fuente else fetch_fn,
-             table, conflict_cols, geom_cols)
+            (name, _con_resume_y_workers(name, fetch_fn), table, conflict_cols, geom_cols)
             for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
         ]
 
@@ -458,6 +495,7 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
     parser.add_argument("--sources", default=None, help="lista separada por comas para correr solo esas fuentes (ej: dga,chirps); default: todas")
     parser.add_argument("--resume-after", default=None, help="codigo de la ultima estacion confirmada upserteada en el log (cod_bna/cod_estacion segun la fuente); retoma el catalogo despues de esa estacion (usar junto con --sources dga|dmc|agromet)")
+    parser.add_argument("--workers", default="1", help=f"estaciones dga scrapeadas en simultaneo, entre 1 y {MAX_DGA_WORKERS} (verificado en vivo el 2026-07-19: con 10 dgasat devuelve 500 en el 100% de los casos; default: 1, secuencial)")
     args = parser.parse_args()
 
     # Dos modos de ventana: --days (relativa al presente, para el cron)
@@ -476,7 +514,9 @@ def main() -> None:
         start = end - timedelta(days=days)
 
     sources = args.sources.split(",") if args.sources else None
-    run(start=start, end=end, dry_run=args.dry_run, sources=sources, resume_after=args.resume_after)
+    workers = parse_workers(args.workers)
+    run(start=start, end=end, dry_run=args.dry_run, sources=sources,
+        resume_after=args.resume_after, workers=workers)
 
 
 if __name__ == "__main__":

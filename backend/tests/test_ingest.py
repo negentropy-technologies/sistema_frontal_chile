@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from datetime import datetime, timezone
 
 from db import get_engine, load_config, upsert
-from ingest import parse_days
+from ingest import MAX_DGA_WORKERS, parse_days, parse_workers
 from sqlalchemy import text
 
 
@@ -32,6 +32,23 @@ def test_parse_days_rejects_out_of_range():
     for invalid in ("0", "91", "-3", "abc"):
         try:
             parse_days(invalid)
+            assert False, f"se esperaba ValueError para {invalid!r}"
+        except ValueError:
+            pass
+
+
+def test_parse_workers_accepts_valid_range():
+    assert parse_workers("1") == 1
+    assert parse_workers(str(MAX_DGA_WORKERS)) == MAX_DGA_WORKERS
+
+
+def test_parse_workers_rejects_out_of_range():
+    # 10 es justo el valor que en vivo el 2026-07-19 hizo que dgasat
+    # devolviera 500 en el 100% de los casos: debe rechazarse antes de
+    # llegar a dga.fetch_batches.
+    for invalid in ("0", "10", "-1", "abc"):
+        try:
+            parse_workers(invalid)
             assert False, f"se esperaba ValueError para {invalid!r}"
         except ValueError:
             pass
@@ -83,5 +100,7 @@ def test_upsert_is_idempotent():
 if __name__ == "__main__":
     test_parse_days_accepts_valid_range()
     test_parse_days_rejects_out_of_range()
+    test_parse_workers_accepts_valid_range()
+    test_parse_workers_rejects_out_of_range()
     test_upsert_is_idempotent()
     print("OK: todos los tests de ingest.py pasaron")

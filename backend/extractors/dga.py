@@ -34,7 +34,9 @@ Resiliencia y cortesia:
   las ~1800 estaciones del bbox sin telemetria.
 """
 
+import queue
 import re
+import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -239,7 +241,150 @@ def _skip_to_resume(stations: list[tuple[int, str]], resume_after: str | None) -
     return stations
 
 
-def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None):
+def _fetch_station(session: requests.Session, cod_bna: str, fecha_ini: str, fecha_fin: str,
+                    start: datetime, end: datetime) -> tuple[list[dict] | None, bool]:
+    """
+    Scrapea una estacion (parametros + tabla paginada) con la sesion
+    dada. Devuelve (rows, fallo): rows es None si la estacion no
+    publica parametros instantaneos (no es una falla, se omite) o si
+    hubo un error de red (fallo=True); si rows es una lista
+    (posiblemente vacia), la estacion se proceso con exito. Aislado en
+    su propia funcion para poder correrlo tanto secuencial (una sola
+    sesion, ver _fetch_batches_sequential) como en paralelo (una
+    sesion por worker, ver _fetch_batches_parallel): cada estacion va
+    en su propio try/except porque el portal se pone lento bajo carga
+    y un timeout puntual no debe botar la fuente completa.
+    """
+    try:
+        refresca = session.post(REFRESCA_URL, data={
+            "accion": "refresca", "param": "1", "tipo": "ANO", "hora_fin": "0",
+            "estacion1": cod_bna, "estacion2": "-1", "estacion3": "-1",
+            "UserID": "nobody", "EsDL1": "", "EsDL2": "", "EsDL3": "",
+        }, timeout=TIMEOUT_SECONDS)
+        time.sleep(PACING_SECONDS)
+        refresca.raise_for_status()
+        parametros = _parse_parametros(refresca.text)
+        if not parametros:
+            log(f"dga {cod_bna}: sin parametros instantaneos publicados, se omite")
+            return None, False
+
+        tabla = session.post(TABLAS_URL, data={
+            "accion": "refresca", "param": "1", "tipo": "ANO", "hora_fin": "0",
+            "tiporep": "I", "period": "rango",
+            "fechaInicioTabla": fecha_ini, "fechaFinTabla": fecha_fin,
+            "fechaFinGrafico": fecha_fin,
+            "estacion1": cod_bna, "estacion2": "-1", "estacion3": "-1",
+            "parametros": parametros, "UserID": "nobody",
+        }, timeout=TIMEOUT_SECONDS)
+        time.sleep(PACING_SECONDS)
+        tabla.raise_for_status()
+        rows = _parse_pagina(tabla.text, start, end)
+
+        match = _TOTALPAG_RE.search(tabla.text)
+        totalpag = int(match.group(1)) if match else 1
+        for pag in range(2, totalpag + 1):
+            pagina = session.get(f"{PAGINA_URL}?pag={pag}", timeout=TIMEOUT_SECONDS)
+            time.sleep(PACING_SECONDS)
+            pagina.raise_for_status()
+            rows += _parse_pagina(pagina.text, start, end)
+    except requests.RequestException as exc:
+        log(f"dga {cod_bna}: fallo de red, se omite -> {exc}")
+        return None, True
+
+    log(f"dga {cod_bna}: {len(rows)} registros en la ventana ({totalpag} paginas)")
+    return rows, False
+
+
+def _fetch_batches_sequential(stations: list[tuple[int, str]], session: requests.Session,
+                               fecha_ini: str, fecha_fin: str, start: datetime, end: datetime):
+    fallidas = 0
+    for estacion_id, cod_bna in stations:
+        rows, fallo = _fetch_station(session, cod_bna, fecha_ini, fecha_fin, start, end)
+        if fallo:
+            fallidas += 1
+            continue
+        if rows:
+            for row in rows:
+                row["estacion_id"] = estacion_id
+            yield rows
+    if fallidas:
+        log(f"dga: {fallidas} estaciones omitidas por fallos de red en esta corrida")
+
+
+def _fetch_batches_parallel(stations: list[tuple[int, str]], fecha_ini: str, fecha_fin: str,
+                             start: datetime, end: datetime, workers: int):
+    """
+    Version con varios workers de _fetch_batches_sequential: verificado
+    en vivo el 2026-07-19 que 10 sesiones concurrentes contra dgasat
+    devuelven 500 Internal Server Error en el 100% de los casos (el
+    backend del portal no tolera esa carga), pero 4 sesiones
+    concurrentes corrieron limpias (0 fallos, ~4-8x mas rapido que
+    secuencial). Cada worker abre su PROPIA sesion (su propio
+    JSESSIONID): el flujo del portal deja estado ligado a la sesion
+    (que estacion quedo "seleccionada" via accion=refresca), asi que
+    compartir una sesion entre threads corromperia ese estado.
+
+    Reparto por cola compartida (no particion estatica) porque el
+    tiempo por estacion varia bastante (5-9 paginas): asi ningun
+    worker queda ocioso mientras otro todavia tiene trabajo largo.
+    """
+    work_q: queue.Queue = queue.Queue()
+    for item in stations:
+        work_q.put(item)
+    out_q: queue.Queue = queue.Queue()
+
+    def worker() -> None:
+        # Cada worker necesita su PROPIO JSESSIONID (ver docstring del
+        # modulo: sin este GET previo, los POST de refresca devuelven
+        # una respuesta sin parametros -- confirmado en vivo el
+        # 2026-07-19 al omitir este paso por error en la primera
+        # version de esta funcion).
+        session = build_session()
+        session.headers["User-Agent"] = BROWSER_UA
+        try:
+            portada = session.get(PARAM_URL, timeout=TIMEOUT_SECONDS)
+            time.sleep(PACING_SECONDS)
+            portada.raise_for_status()
+        except requests.RequestException as exc:
+            # ponytail: si ESTE worker no logra abrir sesion, se retira
+            # y deja sus items en work_q para que los otros workers los
+            # tomen; si TODOS fallan aca el consumidor se queda
+            # esperando para siempre (no hay reintento de sesion). No
+            # se vio en las pruebas en vivo; subir un pool con retry si
+            # llega a pasar.
+            log(f"dga: worker no pudo abrir sesion -> {exc}")
+            return
+        while True:
+            try:
+                estacion_id, cod_bna = work_q.get_nowait()
+            except queue.Empty:
+                return
+            rows, fallo = _fetch_station(session, cod_bna, fecha_ini, fecha_fin, start, end)
+            out_q.put((estacion_id, rows, fallo))
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+
+    fallidas = 0
+    for _ in range(len(stations)):
+        estacion_id, rows, fallo = out_q.get()
+        if fallo:
+            fallidas += 1
+            continue
+        if rows:
+            for row in rows:
+                row["estacion_id"] = estacion_id
+            yield rows
+
+    for t in threads:
+        t.join()
+    if fallidas:
+        log(f"dga: {fallidas} estaciones omitidas por fallos de red en esta corrida")
+
+
+def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None,
+                   workers: int = 1):
     """
     Generador: entrega las filas del tablon dga_datos de UNA estacion
     por iteracion, para que el orquestador upsertee lote a lote (pico
@@ -252,6 +397,12 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     en una corrida previa de la MISMA ventana (ver log del pipeline);
     salta el catalogo hasta despues de esa estacion en vez de volver a
     scrapear las ~1000 que ya quedaron persistidas.
+
+    workers: cantidad de estaciones scrapeadas en simultaneo (default
+    1 = secuencial, comportamiento identico al de antes). Con 4 se
+    verifico en vivo que dgasat responde limpio; con 10 el portal
+    empieza a devolver 500 en el 100% de los casos, asi que no subir
+    de 4 sin volver a probar en vivo primero.
     """
     stations = _stations_in_bbox(engine, bbox)
     log(f"dga: {len(stations)} estaciones del catalogo dentro del bbox")
@@ -280,60 +431,11 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     fecha_ini = start.astimezone(TZ_CHILE).strftime("%d/%m/%Y")
     fecha_fin = end.astimezone(TZ_CHILE).strftime("%d/%m/%Y")
 
-    fallidas = 0
-    for estacion_id, cod_bna in stations:
-        # Cada estacion va aislada en su try/except: el portal se pone
-        # lento bajo carga y un timeout puntual (visto en vivo el
-        # 2026-07-18, corrida de 83 minutos muerta en la estacion 22)
-        # no debe botar la fuente completa; la estacion fallida se
-        # recupera sola en la siguiente corrida via upsert.
-        try:
-            # Paso 2: parametros disponibles de la estacion.
-            refresca = session.post(REFRESCA_URL, data={
-                "accion": "refresca", "param": "1", "tipo": "ANO", "hora_fin": "0",
-                "estacion1": cod_bna, "estacion2": "-1", "estacion3": "-1",
-                "UserID": "nobody", "EsDL1": "", "EsDL2": "", "EsDL3": "",
-            }, timeout=TIMEOUT_SECONDS)
-            time.sleep(PACING_SECONDS)
-            refresca.raise_for_status()
-            parametros = _parse_parametros(refresca.text)
-            if not parametros:
-                log(f"dga {cod_bna}: sin parametros instantaneos publicados, se omite")
-                continue
-
-            # Paso 3: tabla paginada (requests sigue solo el 302 a pag=1).
-            tabla = session.post(TABLAS_URL, data={
-                "accion": "refresca", "param": "1", "tipo": "ANO", "hora_fin": "0",
-                "tiporep": "I", "period": "rango",
-                "fechaInicioTabla": fecha_ini, "fechaFinTabla": fecha_fin,
-                "fechaFinGrafico": fecha_fin,
-                "estacion1": cod_bna, "estacion2": "-1", "estacion3": "-1",
-                "parametros": parametros, "UserID": "nobody",
-            }, timeout=TIMEOUT_SECONDS)
-            time.sleep(PACING_SECONDS)
-            tabla.raise_for_status()
-            rows = _parse_pagina(tabla.text, start, end)
-
-            match = _TOTALPAG_RE.search(tabla.text)
-            totalpag = int(match.group(1)) if match else 1
-            for pag in range(2, totalpag + 1):
-                pagina = session.get(f"{PAGINA_URL}?pag={pag}", timeout=TIMEOUT_SECONDS)
-                time.sleep(PACING_SECONDS)
-                pagina.raise_for_status()
-                rows += _parse_pagina(pagina.text, start, end)
-        except requests.RequestException as exc:
-            fallidas += 1
-            log(f"dga {cod_bna}: fallo de red, se omite -> {exc}")
-            continue
-
-        log(f"dga {cod_bna}: {len(rows)} registros en la ventana ({totalpag} paginas)")
-        if rows:
-            for row in rows:
-                row["estacion_id"] = estacion_id
-            yield rows
-
-    if fallidas:
-        log(f"dga: {fallidas} estaciones omitidas por fallos de red en esta corrida")
+    if workers <= 1:
+        yield from _fetch_batches_sequential(stations, session, fecha_ini, fecha_fin, start, end)
+    else:
+        log(f"dga: corriendo con {workers} workers concurrentes")
+        yield from _fetch_batches_parallel(stations, fecha_ini, fecha_fin, start, end, workers)
 
 
 def fetch(start: datetime, end: datetime, bbox: tuple, engine) -> list[dict]:

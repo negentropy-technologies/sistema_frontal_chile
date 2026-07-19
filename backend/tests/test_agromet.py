@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from agromet_stations import load_stations
-from extractors.agromet import CAMPOS, _parse_datos
+from extractors.agromet import CAMPOS, _parse_datos, _skip_to_resume
 
 MIGRATION_TABLON = Path(__file__).resolve().parent.parent / "migrations" / "0003_agromet.sql"
 
@@ -71,9 +71,27 @@ def test_campos_sincronizados_con_migracion():
         assert f"    {columna} DOUBLE PRECISION" in tablon, f"columna {columna} falta en 0003"
 
 
+def test_skip_to_resume_corta_despues_del_cod_estacion_dado():
+    stations = [(1, "AAA"), (2, "BBB"), (3, "CCC")]
+    assert _skip_to_resume(stations, "BBB") == [(3, "CCC")]
+
+
+def test_skip_to_resume_sin_valor_no_filtra():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, None) == stations
+
+
+def test_skip_to_resume_no_encontrado_corre_completo():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, "ZZZ") == stations
+
+
 if __name__ == "__main__":
     test_parse_datos_extrae_filas_normalizadas()
     test_parse_datos_filtra_por_ventana()
     test_seed_catalogo()
     test_campos_sincronizados_con_migracion()
+    test_skip_to_resume_corta_despues_del_cod_estacion_dado()
+    test_skip_to_resume_sin_valor_no_filtra()
+    test_skip_to_resume_no_encontrado_corre_completo()
     print("OK: todos los tests de agromet pasaron")

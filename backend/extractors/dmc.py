@@ -145,7 +145,24 @@ def _month_payload(session, config: dict, cod_estacion: str, year: int, month: i
     return payload
 
 
-def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
+def _skip_to_resume(stations: list[tuple[int, str]], resume_after: str | None) -> list[tuple[int, str]]:
+    """
+    Recorta el catalogo a lo que falta por procesar cuando una corrida
+    se retoma tras un corte (--resume-after <cod_estacion>). Si el
+    codigo no calza con ninguna estacion del catalogo se corre la
+    ventana completa en vez de fallar: es mas seguro reprocesar de
+    mas, idempotente via upsert, que saltarse estaciones por error.
+    """
+    if resume_after is None:
+        return stations
+    for i, (_, cod) in enumerate(stations):
+        if cod == resume_after:
+            return stations[i + 1:]
+    log(f"dmc: resume_after {resume_after!r} no encontrado en el catalogo, se corre completo")
+    return stations
+
+
+def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None):
     """
     Generador: entrega las filas del tablon dmc_datos de UNA estacion
     por iteracion. El orquestador upsertea cada lote apenas sale, asi
@@ -153,6 +170,10 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
     completa, y una corrida interrumpida deja persistidas las
     estaciones ya procesadas. Cada llamada a la API queda logueada:
     nada de silencios largos en el log del pipeline.
+
+    resume_after: cod_estacion de la ultima estacion confirmada
+    upserteada en una corrida previa de la MISMA ventana; salta el
+    catalogo hasta despues de esa estacion.
     """
     from db import load_config
 
@@ -160,6 +181,9 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
     log(f"dmc: {len(stations)} estaciones del catalogo dentro del bbox")
     if not stations:
         return
+    stations = _skip_to_resume(stations, resume_after)
+    if resume_after is not None:
+        log(f"dmc: retomando despues de {resume_after}, {len(stations)} estaciones restantes")
 
     config = load_config()
     session = build_session()

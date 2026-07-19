@@ -221,7 +221,25 @@ def _stations_in_bbox(engine, bbox: tuple) -> list[tuple[int, str]]:
     return [(row[0], row[1]) for row in records]
 
 
-def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
+def _skip_to_resume(stations: list[tuple[int, str]], resume_after: str | None) -> list[tuple[int, str]]:
+    """
+    Recorta el catalogo a lo que falta por procesar cuando una corrida
+    se retoma tras un corte (--resume-after <cod_bna>). Si el codigo no
+    calza con ninguna estacion del catalogo (por ejemplo cambio el
+    bbox entre corridas), se corre la ventana completa en vez de
+    fallar: es mas seguro reprocesar de mas, idempotente via upsert,
+    que saltarse estaciones por error.
+    """
+    if resume_after is None:
+        return stations
+    for i, (_, cod) in enumerate(stations):
+        if cod == resume_after:
+            return stations[i + 1:]
+    log(f"dga: resume_after {resume_after!r} no encontrado en el catalogo, se corre completo")
+    return stations
+
+
+def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None):
     """
     Generador: entrega las filas del tablon dga_datos de UNA estacion
     por iteracion, para que el orquestador upsertee lote a lote (pico
@@ -229,6 +247,11 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
     persistido). El rango se pide en fechas locales de Chile porque
     asi lo espera el portal; el recorte fino a [start, end] se hace al
     parsear.
+
+    resume_after: cod_bna de la ultima estacion confirmada upserteada
+    en una corrida previa de la MISMA ventana (ver log del pipeline);
+    salta el catalogo hasta despues de esa estacion en vez de volver a
+    scrapear las ~1000 que ya quedaron persistidas.
     """
     stations = _stations_in_bbox(engine, bbox)
     log(f"dga: {len(stations)} estaciones del catalogo dentro del bbox")
@@ -249,6 +272,10 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
     telemetrizadas = set(_OPTION_RE.findall(portada.text))
     stations = [(sid, cod) for sid, cod in stations if cod in telemetrizadas]
     log(f"dga: {len(stations)} de esas estaciones publican en dgasat")
+
+    stations = _skip_to_resume(stations, resume_after)
+    if resume_after is not None:
+        log(f"dga: retomando despues de {resume_after}, {len(stations)} estaciones restantes")
 
     fecha_ini = start.astimezone(TZ_CHILE).strftime("%d/%m/%Y")
     fecha_fin = end.astimezone(TZ_CHILE).strftime("%d/%m/%Y")

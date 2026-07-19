@@ -18,7 +18,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dmc_stations import reparar_encoding
-from extractors.dmc import COLUMNAS, _months, _numeric
+from extractors.dmc import COLUMNAS, _months, _numeric, _skip_to_resume
 
 MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0002_dmc.sql"
 DICCIONARIO = Path(__file__).resolve().parent.parent / "migrations" / "0002_dmc.sql"
@@ -68,10 +68,28 @@ def test_reparar_encoding():
     assert reparar_encoding("") == ""
 
 
+def test_skip_to_resume_corta_despues_del_cod_estacion_dado():
+    stations = [(1, "AAA"), (2, "BBB"), (3, "CCC")]
+    assert _skip_to_resume(stations, "BBB") == [(3, "CCC")]
+
+
+def test_skip_to_resume_sin_valor_no_filtra():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, None) == stations
+
+
+def test_skip_to_resume_no_encontrado_corre_completo():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, "ZZZ") == stations
+
+
 if __name__ == "__main__":
     test_months_within_one_month()
     test_months_across_year_boundary()
     test_numeric()
     test_columnas_sincronizadas_con_migracion()
     test_reparar_encoding()
+    test_skip_to_resume_corta_despues_del_cod_estacion_dado()
+    test_skip_to_resume_sin_valor_no_filtra()
+    test_skip_to_resume_no_encontrado_corre_completo()
     print("OK: todos los tests de dmc pasaron")

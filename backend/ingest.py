@@ -196,7 +196,8 @@ def parse_date(raw: str) -> datetime:
         raise ValueError(f"la fecha debe ser YYYY-MM-DD, se recibio {raw!r}")
 
 
-def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None) -> None:
+def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None,
+        resume_after: str | None = None) -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -204,6 +205,17 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
     detiene a las demas. En dry-run no se escribe nada, ni siquiera en
     ingest_runs, pero el tunel igual se abre: valida de paso que la
     conexion con el rol acotado funciona.
+
+    resume_after solo aplica a las fuentes que scrapean estacion por
+    estacion (dga, dmc, agromet: las que demostraron cortarse a mitad
+    de corrida por caidas del tunel SSH o de internet, corridas de
+    horas contra catalogos de cientos de estaciones). Se pasa junto
+    con --sources <una de esas tres> para retomar el catalogo justo
+    despues del ultimo codigo de estacion confirmado upserteado en el
+    log, sin repetir el scraping ya persistido. gee_goes, nasa_imerg,
+    imerg_choropleth y chirps no tienen este mecanismo: piden toda la
+    ventana en una sola llamada (no hay "estacion por estacion" que
+    retomar) y una corrida cortada se relanza completa.
     """
     config = _app_role_config()
 
@@ -217,6 +229,17 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
         if desconocidas:
             raise ValueError(f"fuentes desconocidas: {sorted(desconocidas)}; validas: {sorted(conocidas)}")
         seleccion = [s for s in SOURCES if s[0] in sources]
+
+    if resume_after is not None:
+        modulo_por_fuente = {"dga": dga, "dmc": dmc, "agromet": agromet}
+        seleccion = [
+            (name,
+             (lambda s, e, en, mod=modulo_por_fuente[name], ra=resume_after:
+                 mod.fetch_batches(s, e, REGION_BBOX, en, resume_after=ra))
+             if name in modulo_por_fuente else fetch_fn,
+             table, conflict_cols, geom_cols)
+            for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
+        ]
 
     with get_engine(config) as engine:
         for name, fetch_fn, table, conflict_cols, geom_cols in seleccion:
@@ -252,18 +275,30 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
 
             if dry_run:
                 continue
-            with engine.begin() as conn:
-                conn.execute(text(
-                    "INSERT INTO frontal_sur.ingest_runs "
-                    "(started_at, finished_at, source, status, error) "
-                    "VALUES (:started_at, :finished_at, :source, :status, :error)"
-                ), {
-                    "started_at": started_at,
-                    "finished_at": datetime.now(timezone.utc),
-                    "source": name,
-                    "status": status,
-                    "error": error,
-                })
+            try:
+                with engine.begin() as conn:
+                    conn.execute(text(
+                        "INSERT INTO frontal_sur.ingest_runs "
+                        "(started_at, finished_at, source, status, error) "
+                        "VALUES (:started_at, :finished_at, :source, :status, :error)"
+                    ), {
+                        "started_at": started_at,
+                        "finished_at": datetime.now(timezone.utc),
+                        "source": name,
+                        "status": status,
+                        "error": error,
+                    })
+            except Exception as exc:
+                # Si la fuente ya fallo por perder la conexion (el caso
+                # de esta noche: tunel SSH caido a mitad de corrida),
+                # este INSERT tambien va a fallar. Sin este try/except
+                # esa segunda excepcion no tenia donde caer y tumbaba
+                # TODO el proceso, matando de paso las fuentes que
+                # todavia no habian corrido en este run. Se deja
+                # loggeado y se sigue con la siguiente fuente: registrar
+                # en ingest_runs es best-effort, no debe ser un punto
+                # unico de falla para el resto del pipeline.
+                log(f"== fuente {name}: no se pudo registrar en ingest_runs -> {exc}")
 
 
 def main() -> None:
@@ -273,6 +308,7 @@ def main() -> None:
     parser.add_argument("--end", default=None, help="fecha final YYYY-MM-DD (con --start)")
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
     parser.add_argument("--sources", default=None, help="lista separada por comas para correr solo esas fuentes (ej: dga,chirps); default: todas")
+    parser.add_argument("--resume-after", default=None, help="codigo de la ultima estacion confirmada upserteada en el log (cod_bna/cod_estacion segun la fuente); retoma el catalogo despues de esa estacion (usar junto con --sources dga|dmc|agromet)")
     args = parser.parse_args()
 
     # Dos modos de ventana: --days (relativa al presente, para el cron)
@@ -291,7 +327,7 @@ def main() -> None:
         start = end - timedelta(days=days)
 
     sources = args.sources.split(",") if args.sources else None
-    run(start=start, end=end, dry_run=args.dry_run, sources=sources)
+    run(start=start, end=end, dry_run=args.dry_run, sources=sources, resume_after=args.resume_after)
 
 
 if __name__ == "__main__":

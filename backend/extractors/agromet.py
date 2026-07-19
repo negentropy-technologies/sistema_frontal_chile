@@ -117,18 +117,42 @@ def _stations_in_bbox(engine, bbox: tuple) -> list[tuple[int, str]]:
     return [(row[0], row[1]) for row in records]
 
 
-def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine):
+def _skip_to_resume(stations: list[tuple[int, str]], resume_after: str | None) -> list[tuple[int, str]]:
+    """
+    Recorta el catalogo a lo que falta por procesar cuando una corrida
+    se retoma tras un corte (--resume-after <cod_estacion>). Si el
+    codigo no calza con ninguna estacion del catalogo se corre la
+    ventana completa en vez de fallar: es mas seguro reprocesar de
+    mas, idempotente via upsert, que saltarse estaciones por error.
+    """
+    if resume_after is None:
+        return stations
+    for i, (_, cod) in enumerate(stations):
+        if cod == resume_after:
+            return stations[i + 1:]
+    log(f"agromet: resume_after {resume_after!r} no encontrado en el catalogo, se corre completo")
+    return stations
+
+
+def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None):
     """
     Generador: entrega las filas del tablon agromet_datos de UNA
     estacion por iteracion, para que el orquestador upsertee lote a
     lote (pico de memoria constante, corridas interrumpidas dejan lo
     procesado persistido). La ventana se pide en hora local de Chile
     porque asi la espera el endpoint.
+
+    resume_after: cod_estacion de la ultima estacion confirmada
+    upserteada en una corrida previa de la MISMA ventana; salta el
+    catalogo hasta despues de esa estacion.
     """
     stations = _stations_in_bbox(engine, bbox)
     log(f"agromet: {len(stations)} estaciones del catalogo dentro del bbox")
     if not stations:
         return
+    stations = _skip_to_resume(stations, resume_after)
+    if resume_after is not None:
+        log(f"agromet: retomando despues de {resume_after}, {len(stations)} estaciones restantes")
 
     # La API construye su grilla horaria arrastrando los minutos y
     # segundos del request (pedir dateFrom=..:42:24 genera slots a las

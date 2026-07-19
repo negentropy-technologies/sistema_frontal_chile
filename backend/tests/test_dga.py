@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dga_stations import load_stations
-from extractors.dga import ETIQUETAS, PARAMETROS, _columnas, _parse_pagina, _parse_parametros
+from extractors.dga import ETIQUETAS, PARAMETROS, _columnas, _parse_pagina, _parse_parametros, _skip_to_resume
 
 MIGRATION = Path(__file__).resolve().parent.parent / "migrations" / "0004_dga.sql"
 
@@ -112,6 +112,21 @@ def test_seed_catalogo():
     assert any(row["cod_bna"] == "08317001-8" for row in rows)
 
 
+def test_skip_to_resume_corta_despues_del_cod_bna_dado():
+    stations = [(1, "AAA"), (2, "BBB"), (3, "CCC")]
+    assert _skip_to_resume(stations, "BBB") == [(3, "CCC")]
+
+
+def test_skip_to_resume_sin_valor_no_filtra():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, None) == stations
+
+
+def test_skip_to_resume_no_encontrado_corre_completo():
+    stations = [(1, "AAA")]
+    assert _skip_to_resume(stations, "ZZZ") == stations
+
+
 def test_parametros_sincronizados_con_migracion():
     ddl = MIGRATION.read_text()
     for columna in PARAMETROS.values():
@@ -125,6 +140,9 @@ if __name__ == "__main__":
     test_parse_pagina_filtra_por_ventana()
     test_columnas_mapea_encabezados()
     test_parse_parametros_filtra_ids_mapeados()
+    test_skip_to_resume_corta_despues_del_cod_bna_dado()
+    test_skip_to_resume_sin_valor_no_filtra()
+    test_skip_to_resume_no_encontrado_corre_completo()
     test_seed_catalogo()
     test_parametros_sincronizados_con_migracion()
     print("OK: todos los tests de dga pasaron")

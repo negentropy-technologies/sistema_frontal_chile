@@ -134,6 +134,7 @@ def climatology_for_dayofyear(
                 log(f"chirps_climatology {year}-{month:02d}-{day:02d}: no publicado, se salta")
                 continue
             _crop_day(url, bbox, dest_path)
+            log(f"chirps_climatology {year}-{month:02d}-{day:02d}: recortado por rango HTTP")
         with rasterio.open(dest_path) as src:
             capas.append(src.read(1).astype("float64"))
             transform = src.transform

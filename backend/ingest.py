@@ -18,16 +18,19 @@ Uso:
 
 import argparse
 import sys
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import GeneratorType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import rasterio
 from sqlalchemy import text
 
 from db import get_engine, load_config, upsert
-from extractors import agromet, chirps, dga, dmc, gee, nasa_imerg
+from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dga, dmc, gee, nasa_imerg
+from extractors._raster import save_png_overlay
 from logutil import log
 
 # Unica fuente de verdad geografica del proyecto: Coquimbo a
@@ -72,6 +75,141 @@ def _fetch_choropleth_windows(start: datetime, end: datetime, engine) -> list[di
     for days, variable in CHOROPLETH_WINDOWS:
         rows += nasa_imerg.fetch_choropleth(end - timedelta(days=days), end, REGION_BBOX,
                                             variable=variable, engine=engine)
+    return rows
+
+
+# Precipitacion diaria por estacion en la ventana, una fila por
+# (dia, fuente): SUM para dga/agromet (parametros instantaneos/horarios
+# que hay que acumular) y MAX para dmc (agua_caida_24_horas ya es un
+# acumulado de 24h, tomar el ultimo/mayor valor del dia lo aproxima sin
+# duplicar). Se arma con un UNION ALL de tres CTEs en vez de un JOIN
+# entre las tres tablas: no comparten cadencia horaria ni existe una
+# clave natural para cruzarlas fila a fila, un JOIN ahi produciria un
+# producto cruzado erroneo. Costo: un aggregate scan por tabla acotado
+# por el rango [:start, :end] usando el indice *_datos_momento_idx ya
+# existente, no un full scan.
+ANOMALIA_ESTACIONES_SQL = """
+WITH dga_diario AS (
+    SELECT s.geometria AS geom, d.momento::date AS dia,
+           SUM(d.precipitacion_acumulada) AS valor
+    FROM frontal_sur.dga_datos d
+    JOIN frontal_sur.dga_stations s ON s.id = d.estacion_id
+    WHERE d.momento BETWEEN :start AND :end AND d.precipitacion_acumulada IS NOT NULL
+    GROUP BY s.geometria, d.momento::date
+),
+dmc_diario AS (
+    SELECT s.geometria AS geom, d.momento::date AS dia,
+           MAX(d.agua_caida_24_horas) AS valor
+    FROM frontal_sur.dmc_datos d
+    JOIN frontal_sur.dmc_stations s ON s.id = d.ema_id
+    WHERE d.momento BETWEEN :start AND :end AND d.agua_caida_24_horas IS NOT NULL
+    GROUP BY s.geometria, d.momento::date
+),
+agromet_diario AS (
+    SELECT s.geometria AS geom, d.momento::date AS dia,
+           SUM(d.precipitacion_horaria) AS valor
+    FROM frontal_sur.agromet_datos d
+    JOIN frontal_sur.agromet_stations s ON s.id = d.ema_id
+    WHERE d.momento BETWEEN :start AND :end AND d.precipitacion_horaria IS NOT NULL
+    GROUP BY s.geometria, d.momento::date
+)
+SELECT dia, ST_X(geom) AS lon, ST_Y(geom) AS lat, valor FROM dga_diario
+UNION ALL
+SELECT dia, ST_X(geom) AS lon, ST_Y(geom) AS lat, valor FROM dmc_diario
+UNION ALL
+SELECT dia, ST_X(geom) AS lon, ST_Y(geom) AS lat, valor FROM agromet_diario
+ORDER BY dia
+"""
+
+ANOMALY_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "frames" / "chirps_anomaly"
+
+
+def _fetch_anomaly(start: datetime, end: datetime, engine) -> list[dict]:
+    """
+    Anomalia diaria de precipitacion: ajuste de residuos IDW
+    (Ossa-Moreno et al. 2019, ver anomaly.py) entre las estaciones ya
+    ingeridas (dga/dmc/agromet) y el CHIRPS prelim del dia (ya en
+    disco, ver extractors/chirps.py), menos la climatologia historica
+    CHIRPS del mismo dia-del-anio (ver extractors/chirps_climatology.py).
+    Climatologia y CHIRPS prelim comparten el mismo bbox y la misma
+    resolucion nativa CHIRPS v3 (0.05 grados), por eso sus grillas
+    calzan pixel a pixel sin reproyectar.
+
+    Se salta un dia si: no hay ninguna estacion con dato ese dia (no
+    tiene sentido interpolar con cero puntos), si el CHIRPS prelim de
+    ese dia todavia no esta en disco (latencia de ~1 semana del CHC,
+    lo recoge una corrida siguiente), o si ninguna estacion cae dentro
+    de la grilla de fondo. Nada de esto es un error del pipeline.
+
+    La climatologia se descarga (y cachea en disco, igual que el resto
+    de los extractores) la primera vez que se pide un dia-del-anio: en
+    la corrida donde esto se activa por primera vez puede bajar hasta
+    28 anios de historia por cada dia del evento, una descarga grande
+    mordida por rango HTTP (no el archivo global completo); si se
+    corta a mitad de camino, la corrida siguiente retoma sola porque
+    los recortes ya bajados no se vuelven a pedir.
+    """
+    with engine.connect() as conn:
+        filas = conn.execute(text(ANOMALIA_ESTACIONES_SQL), {"start": start, "end": end}).fetchall()
+
+    por_dia = defaultdict(list)
+    for dia, lon, lat, valor in filas:
+        por_dia[dia].append(((lon, lat), valor))
+
+    if not por_dia:
+        log("chirps_anomaly: sin estaciones con dato en la ventana, se salta")
+        return []
+
+    rows = []
+    for dia in sorted(por_dia):
+        valid_time = datetime(dia.year, dia.month, dia.day, tzinfo=timezone.utc)
+        chirps_tif = chirps.DATA_DIR / "chirps_precipitation" / f"{valid_time:%Y%m%dT000000}.tif"
+        if not chirps_tif.exists():
+            log(f"chirps_anomaly {dia}: sin CHIRPS prelim en disco todavia, se salta")
+            continue
+
+        with rasterio.open(chirps_tif) as src:
+            background_grid = src.read(1).astype("float64")
+            profile = src.profile.copy()
+            transform = src.transform
+
+        try:
+            climatology_grid, _ = chirps_climatology.climatology_for_dayofyear(REGION_BBOX, dia.month, dia.day)
+        except ValueError as exc:
+            log(f"chirps_anomaly {dia}: sin climatologia -> {exc}")
+            continue
+
+        if climatology_grid.shape != background_grid.shape:
+            log(f"chirps_anomaly {dia}: climatologia {climatology_grid.shape} no calza con "
+                f"CHIRPS prelim {background_grid.shape}, se salta")
+            continue
+
+        coords = [c for c, _ in por_dia[dia]]
+        valores = [v for _, v in por_dia[dia]]
+        try:
+            anomaly_grid = anomaly_raster.compute_anomaly_grid(
+                coords, valores, background_grid, transform, climatology_grid,
+            )
+        except ValueError as exc:
+            log(f"chirps_anomaly {dia}: {exc}")
+            continue
+
+        tif_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.tif"
+        png_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.png"
+        anomaly_raster.write_geotiff(anomaly_grid, profile, tif_path)
+        save_png_overlay(tif_path, png_path)
+        log(f"chirps_anomaly {dia}: {len(coords)} estaciones, grilla {anomaly_grid.shape}")
+
+        rows.append({
+            "source": "chirps_anomaly",
+            "variable": "chirps_precip_anomaly",
+            "region": "centro_sur",
+            "valid_time": valid_time,
+            "bbox": list(REGION_BBOX),
+            "file_path": str(tif_path),
+            "png_overlay_path": str(png_path),
+            "created_at": datetime.now(timezone.utc),
+        })
     return rows
 
 
@@ -143,6 +281,17 @@ SOURCES = [
     (
         "chirps",
         lambda start, end, engine: chirps.fetch(start, end, REGION_BBOX),
+        "frontal_sur.frames_raster",
+        ["source", "variable", "region", "valid_time"],
+        None,
+    ),
+    (
+        # chirps_anomaly depende de que dga/dmc/agromet y chirps ya
+        # hayan corrido en esta ventana (lee sus datos desde disco/BD,
+        # no los vuelve a pedir); por eso va al final de la lista, el
+        # orden en que SOURCES corre las fuentes.
+        "chirps_anomaly",
+        _fetch_anomaly,
         "frontal_sur.frames_raster",
         ["source", "variable", "region", "valid_time"],
         None,

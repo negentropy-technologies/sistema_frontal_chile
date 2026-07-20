@@ -1,27 +1,25 @@
 # --- Google Earth Engine (GEE_PROJECT, GEE_USER) ---
-earthengine-api
-geemap          # timelapse/GIF export, timestamp overlays on frames
+earthengine-api   # extractors/gee.py (GOES 19); v2 tambien la usara para DEM/NDVI
 
-# --- NASA Earthdata (EARTHDATA_USER, EARTHDATA_PASSWORD) — GPM IMERG, MODIS ---
-earthaccess
+# --- Postgres/PostGIS, base de datos compartida (DB_*, SSH_*) ---
+sqlalchemy        # Core, sin ORM: conexion y text() para SQL explicito
+psycopg2-binary   # driver que sqlalchemy carga para el dialecto postgresql+psycopg2
+sshtunnel         # tunel SSH hacia el servidor remoto (db.py)
+paramiko<3.0      # sshtunnel 0.4.0 (la ultima version) todavia referencia paramiko.DSSKey, removido en paramiko>=3
 
-# --- Postgres/PostGIS + Martin tile server (DATABASE_URL, DB_*, MARTIN_DB_*) ---
-psycopg2-binary
-sqlalchemy
-geoalchemy2
-
-# --- SSH tunnel to remote DB (SSH_HOST, SSH_KEY_PATH, SSH_REMOTE_DB_PORT) ---
-sshtunnel
-paramiko<3.0  # sshtunnel 0.4.0 (latest) still references paramiko.DSSKey, removed in paramiko>=3
-
-# --- Hugging Face (HF_TOKEN) ---
-huggingface_hub
-
-# --- general geo/data handling ---
-python-dotenv
+# --- HTTP con reintentos (DGA, DMC, Agromet, CHC) ---
 requests
-pandas
-geopandas
-shapely
+urllib3           # extractors/_http.py: urllib3.util.retry.Retry para el backoff
+
+# --- raster (GeoTIFF de GOES, IMERG, CHIRPS y anomalia) ---
 rasterio
-Pillow
+numpy             # IDW vectorizado del ajuste de residuos (anomaly.py, ver Ossa-Moreno et al. 2019)
+Pillow            # overlays PNG de los rasters
+matplotlib        # management/plot_anomaly.py: colormap divergente BrBG para inspeccion manual
+
+# --- configuracion (.env, nunca variables de entorno globales del proceso) ---
+python-dotenv
+
+# --- v2: regresion-kriging con 5 covariables---
+scikit-learn      # regresion (lineal multiple o Random Forest) sobre las covariables de terreno/vegetacion
+pykrige           # kriging de los residuos de esa regresion (distinto del ajuste de residuos IDW de v1)

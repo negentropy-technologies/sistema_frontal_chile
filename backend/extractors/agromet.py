@@ -23,7 +23,9 @@ Resiliencia y cortesia:
 - Estaciones desde el engine del orquestador (un solo tunel SSH).
 """
 
+import queue
 import re
+import threading
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -134,7 +136,111 @@ def _skip_to_resume(stations: list[tuple[int, str]], resume_after: str | None) -
     return stations
 
 
-def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None):
+def _new_session():
+    """
+    Sesion con el user-agent de navegador y verificacion TLS desactivada
+    que requiere agromet.cl (ver docstring del modulo). Separada para
+    que cada worker de _fetch_batches_parallel abra la suya propia.
+    """
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    session = build_session()
+    session.headers["User-Agent"] = BROWSER_UA
+    session.verify = False
+    return session
+
+
+def _fetch_station(session, cod_estacion: str, date_from: str, date_to: str,
+                    start: datetime, end: datetime) -> list[dict]:
+    """
+    Pide y parsea la ventana de una estacion. Aislado en su propia
+    funcion para correr tanto secuencial (una sola sesion) como en
+    paralelo (una sesion por worker, ver _fetch_batches_parallel).
+
+    Lanza RuntimeError si el WAF bloqueo la sesion: a diferencia de un
+    fallo de red puntual, un bloqueo de WAF no es un problema de esta
+    estacion sino de la sesion/IP completa, asi que debe detener TODA
+    la corrida (secuencial o paralela) en vez de saltarse la estacion.
+    """
+    url = (f"{DATA_URL}?ema_ia_id={cod_estacion}"
+           f"&dateFrom={date_from}&dateTo={date_to}&portada=false")
+    response = session.get(url, timeout=60)
+    time.sleep(PACING_SECONDS)
+    response.raise_for_status()
+    if "Web Application Firewall" in response.text:
+        raise RuntimeError("WAF de agromet.cl bloqueo la corrida; reintentar mas tarde con pacing mayor")
+    rows = _parse_datos(response.text, start, end)
+    log(f"agromet {cod_estacion}: {len(rows)} registros en la ventana")
+    return rows
+
+
+def _fetch_batches_sequential(stations: list[tuple[int, str]], session, date_from: str, date_to: str,
+                               start: datetime, end: datetime):
+    for ema_id, cod_estacion in stations:
+        rows = _fetch_station(session, cod_estacion, date_from, date_to, start, end)
+        if rows:
+            for row in rows:
+                row["ema_id"] = ema_id
+            yield rows
+
+
+def _fetch_batches_parallel(stations: list[tuple[int, str]], date_from: str, date_to: str,
+                             start: datetime, end: datetime, workers: int):
+    """
+    Version con varios workers de _fetch_batches_sequential (mismo
+    patron que extractors/dga.py::_fetch_batches_parallel). Verificado
+    en vivo el 2026-07-19 que 4 sesiones concurrentes contra
+    agromet.cl no disparan el WAF (0 bloqueos). Cada worker abre su
+    propia sesion; si un worker recibe el bloqueo del WAF, se detienen
+    todos los demas (stop.set()) en vez de seguir mandando trafico
+    contra un WAF ya activo.
+    """
+    work_q: queue.Queue = queue.Queue()
+    for item in stations:
+        work_q.put(item)
+    out_q: queue.Queue = queue.Queue()
+    stop = threading.Event()
+
+    def worker() -> None:
+        session = _new_session()
+        while not stop.is_set():
+            try:
+                ema_id, cod_estacion = work_q.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                rows = _fetch_station(session, cod_estacion, date_from, date_to, start, end)
+                out_q.put((ema_id, rows, None))
+            except RuntimeError as exc:
+                stop.set()
+                out_q.put((ema_id, None, exc))
+                return
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(workers)]
+    for t in threads:
+        t.start()
+
+    recibidos = 0
+    error_final = None
+    while recibidos < len(stations):
+        ema_id, rows, error = out_q.get()
+        recibidos += 1
+        if error is not None:
+            error_final = error
+            break
+        if rows:
+            for row in rows:
+                row["ema_id"] = ema_id
+            yield rows
+
+    for t in threads:
+        t.join()
+    if error_final is not None:
+        raise error_final
+
+
+def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_after: str | None = None,
+                   workers: int = 1):
     """
     Generador: entrega las filas del tablon agromet_datos de UNA
     estacion por iteracion, para que el orquestador upsertee lote a
@@ -145,6 +251,11 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     resume_after: cod_estacion de la ultima estacion confirmada
     upserteada en una corrida previa de la MISMA ventana; salta el
     catalogo hasta despues de esa estacion.
+
+    workers: cantidad de estaciones scrapeadas en simultaneo (default
+    1 = secuencial, comportamiento identico al de antes). Verificado en
+    vivo el 2026-07-19 que 4 workers responden limpio sin disparar el
+    WAF (mismo techo que dga, ver MAX_SOURCE_WORKERS en ingest.py).
     """
     stations = _stations_in_bbox(engine, bbox)
     log(f"agromet: {len(stations)} estaciones del catalogo dentro del bbox")
@@ -160,36 +271,15 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     # en vivo): la ventana se alinea a horas exactas.
     start = start.replace(minute=0, second=0, microsecond=0)
     end = end.replace(minute=0, second=0, microsecond=0)
-
-    session = build_session()
-    session.headers["User-Agent"] = BROWSER_UA
-    # agromet.cl sirve una cadena de certificados incompleta (falla
-    # CERTIFICATE_VERIFY_FAILED con verificacion estricta); el propio
-    # paquete R agrometR desactiva la verificacion (ssl_verifypeer =
-    # FALSE). Se replica esa decision: son datos publicos de solo
-    # lectura y el riesgo se limita a esta sesion.
-    session.verify = False
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     date_from = start.astimezone(TZ_CHILE).strftime("%Y-%m-%d+%H:%M:%S")
     date_to = end.astimezone(TZ_CHILE).strftime("%Y-%m-%d+%H:%M:%S")
 
-    for ema_id, cod_estacion in stations:
-        url = (f"{DATA_URL}?ema_ia_id={cod_estacion}"
-               f"&dateFrom={date_from}&dateTo={date_to}&portada=false")
-        response = session.get(url, timeout=60)
-        time.sleep(PACING_SECONDS)
-        response.raise_for_status()
-        if "Web Application Firewall" in response.text:
-            # Bloqueo del WAF: error visible en ingest_runs, no un
-            # silencio con 0 filas.
-            raise RuntimeError("WAF de agromet.cl bloqueo la corrida; reintentar mas tarde con pacing mayor")
-        rows = _parse_datos(response.text, start, end)
-        log(f"agromet {cod_estacion}: {len(rows)} registros en la ventana")
-        if rows:
-            for row in rows:
-                row["ema_id"] = ema_id
-            yield rows
+    if workers <= 1:
+        session = _new_session()
+        yield from _fetch_batches_sequential(stations, session, date_from, date_to, start, end)
+    else:
+        log(f"agromet: corriendo con {workers} workers concurrentes")
+        yield from _fetch_batches_parallel(stations, date_from, date_to, start, end, workers)
 
 
 def fetch(start: datetime, end: datetime, bbox: tuple, engine) -> list[dict]:

@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from datetime import datetime, timezone
 
-from db import get_engine, load_config, upsert
-from ingest import MAX_DGA_WORKERS, parse_days, parse_workers
+from db import app_role_config, get_engine, upsert
+from ingest import MAX_SOURCE_WORKERS, parse_days, parse_workers
 from sqlalchemy import text
 
 
@@ -39,7 +39,7 @@ def test_parse_days_rejects_out_of_range():
 
 def test_parse_workers_accepts_valid_range():
     assert parse_workers("1") == 1
-    assert parse_workers(str(MAX_DGA_WORKERS)) == MAX_DGA_WORKERS
+    assert parse_workers(str(MAX_SOURCE_WORKERS)) == MAX_SOURCE_WORKERS
 
 
 def test_parse_workers_rejects_out_of_range():
@@ -55,9 +55,7 @@ def test_parse_workers_rejects_out_of_range():
 
 
 def test_upsert_is_idempotent():
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
+    config = app_role_config()
 
     row = {
         "source": "test_ingest_idempotency",

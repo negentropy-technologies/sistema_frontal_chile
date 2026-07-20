@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from anomaly import compute_anomaly, idw_residuals
+from anomaly import apply_dry_threshold, compute_anomaly, compute_anomaly_windowed, idw_residuals
 
 
 def test_idw_residuals_en_la_estacion_misma_devuelve_su_propio_residuo():
@@ -88,6 +88,44 @@ def test_compute_anomaly_suma_residuo_interpolado_al_fondo():
     assert result == [13.0]  # 8.0 (fondo en la grilla) + 5.0 (residuo)
 
 
+def test_compute_anomaly_windowed_desagrega_proporcional_al_chirps_diario():
+    # Ventana de 30 dias: estacion acumulo 150mm, CHIRPS acumulo 100mm
+    # en esa misma estacion (residuo de ventana = +50). Grilla y
+    # estacion coinciden, asi que el residuo interpolado es +50 en la
+    # grilla: campo corregido de la ventana = 100 + 50 = 150. El dia de
+    # hoy CHIRPS crudo vale 5mm de los 100mm de la ventana (5% de la
+    # forma diaria) => desagregado = 150 * (5/100) = 7.5.
+    result = compute_anomaly_windowed(
+        station_window_totals=[150.0],
+        background_window_at_stations=[100.0],
+        background_window_grid=[100.0],
+        background_daily_grid=[5.0],
+        station_coords=[(0.0, 0.0)],
+        grid_coords=[(0.0, 0.0)],
+    )
+    assert result == [7.5]
+
+
+def test_compute_anomaly_windowed_ventana_seca_da_cero():
+    # CHIRPS no vio lluvia en toda la ventana en este pixel: no hay
+    # forma diaria de la cual desagregar, se fuerza a 0 en vez de
+    # dividir por cero.
+    result = compute_anomaly_windowed(
+        station_window_totals=[150.0],
+        background_window_at_stations=[0.0],
+        background_window_grid=[0.0],
+        background_daily_grid=[0.0],
+        station_coords=[(0.0, 0.0)],
+        grid_coords=[(0.0, 0.0)],
+    )
+    assert result == [0.0]
+
+
+def test_apply_dry_threshold_fuerza_a_cero_bajo_el_umbral():
+    result = apply_dry_threshold([0.3, 0.9, 1.0, 5.0], threshold=1.0)
+    assert result == [0.0, 0.0, 1.0, 5.0]
+
+
 if __name__ == "__main__":
     test_idw_residuals_en_la_estacion_misma_devuelve_su_propio_residuo()
     test_idw_residuals_punto_medio_es_promedio_simple()
@@ -95,4 +133,7 @@ if __name__ == "__main__":
     test_idw_residuals_multiples_puntos_de_grilla_a_la_vez()
     test_idw_residuals_respeta_batch_size_pequeno()
     test_compute_anomaly_suma_residuo_interpolado_al_fondo()
+    test_compute_anomaly_windowed_desagrega_proporcional_al_chirps_diario()
+    test_compute_anomaly_windowed_ventana_seca_da_cero()
+    test_apply_dry_threshold_fuerza_a_cero_bajo_el_umbral()
     print("OK: todos los tests de anomaly pasaron")

@@ -39,6 +39,23 @@ def load_config(env_path: Path = ENV_PATH) -> dict:
     return dict(dotenv_values(env_path))
 
 
+def app_role_config(config: dict | None = None) -> dict:
+    """
+    Devuelve una copia de la config (por defecto, la de load_config())
+    con DB_USER/DB_PASSWORD reemplazados por DB_APP_USER/DB_APP_PASSWORD:
+    el rol acotado frontal_sur_app que usa todo el pipeline y los
+    scripts de management/, en vez del superusuario. Copia el
+    diccionario en vez de mutar el que recibe, para no pisar la config
+    original si el caller la sigue usando para otra cosa.
+    """
+    if config is None:
+        config = load_config()
+    resultado = dict(config)
+    resultado["DB_USER"] = resultado["DB_APP_USER"]
+    resultado["DB_PASSWORD"] = resultado["DB_APP_PASSWORD"]
+    return resultado
+
+
 def build_db_url(config: dict, local_port: int) -> str:
     """
     Construye la URL de conexion de SQLAlchemy (dialecto psycopg2)

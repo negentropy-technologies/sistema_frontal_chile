@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "management"))
 
 from dga_stations import load_stations
 from extractors.dga import ETIQUETAS, PARAMETROS, _columnas, _parse_pagina, _parse_parametros, _skip_to_resume

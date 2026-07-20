@@ -13,10 +13,13 @@ negentropy_market, cadastrai, cuencas, etc).
 Un rol de solo lectura para servir datos a un API/Martin (webmapping)
 no esta cubierto aca: es un plan separado, todavia no escrito.
 
-Correr con: .venv/bin/python create_role.py <password>
+Correr con: .venv/bin/python backend/management/create_role.py <password>
 """
 
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import text
 

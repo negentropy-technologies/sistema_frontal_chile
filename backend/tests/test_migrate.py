@@ -17,6 +17,7 @@ from pathlib import Path
 # Agrega la raiz del proyecto al path de importacion. Se usa pathlib
 # en vez de os.path para construir la ruta.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "management"))
 
 from migrate import pending_migrations
 

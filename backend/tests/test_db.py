@@ -18,7 +18,7 @@ from pathlib import Path
 # el proyecto como paquete. Se usa pathlib en vez de os.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from db import build_db_url, build_ssh_tunnel_kwargs, build_upsert_sql
+from db import app_role_config, build_db_url, build_ssh_tunnel_kwargs, build_upsert_sql
 
 
 def test_build_db_url():
@@ -74,9 +74,20 @@ def test_build_upsert_sql_with_geom():
     assert "VALUES (:station_id, ST_GeomFromText(:geom, 4326), :value)" in sql
 
 
+def test_app_role_config_swaps_user_and_password():
+    # No debe mutar el diccionario recibido: config original intacta
+    # para que el caller la pueda seguir usando (ver docstring).
+    config = {"DB_USER": "postgres", "DB_PASSWORD": "root", "DB_APP_USER": "frontal_sur_app", "DB_APP_PASSWORD": "hunter2"}
+    resultado = app_role_config(config)
+    assert resultado["DB_USER"] == "frontal_sur_app"
+    assert resultado["DB_PASSWORD"] == "hunter2"
+    assert config["DB_USER"] == "postgres"
+
+
 if __name__ == "__main__":
     test_build_db_url()
     test_build_ssh_tunnel_kwargs()
     test_build_upsert_sql_plain()
     test_build_upsert_sql_with_geom()
+    test_app_role_config_swaps_user_and_password()
     print("OK: todos los tests de db.py pasaron")

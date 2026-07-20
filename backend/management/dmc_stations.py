@@ -10,10 +10,15 @@ Correr una vez al inicio y luego ocasionalmente (la red EMA cambia
 poco): el upsert por station_id lo hace idempotente.
 
 Uso:
-    .venv/bin/python backend/dmc_stations.py
+    .venv/bin/python backend/management/dmc_stations.py
 """
 
-from db import get_engine, load_config, upsert
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from db import app_role_config, get_engine, load_config, upsert
 from extractors._http import build_session
 
 STATIONS_URL = "https://climatologia.meteochile.gob.cl/application/servicios/getEstacionesRedEma"
@@ -81,10 +86,7 @@ def run() -> None:
     frontal_sur_app. Imprime cuantas estaciones quedaron.
     """
     rows = fetch_stations()
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-    with get_engine(config) as engine:
+    with get_engine(app_role_config()) as engine:
         count = upsert(engine, "frontal_sur.dmc_stations", rows, ["cod_estacion"], {"geometria": 4326})
     print(f"{count} estaciones EMA upserteadas en frontal_sur.dmc_stations")
 

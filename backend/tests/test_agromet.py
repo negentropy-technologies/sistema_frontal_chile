@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "management"))
 
 from agromet_stations import load_stations
 from extractors.agromet import CAMPOS, _parse_datos, _skip_to_resume

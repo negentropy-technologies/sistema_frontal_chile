@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "management"))
 
 from dmc_stations import reparar_encoding
 from extractors.dmc import COLUMNAS, _months, _numeric, _skip_to_resume

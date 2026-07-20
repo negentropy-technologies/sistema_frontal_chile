@@ -37,7 +37,7 @@ import requests
 from rasterio.features import geometry_mask
 from rasterio.transform import from_origin
 
-from db import load_config
+from db import app_role_config, load_config
 from extractors._http import mount_retries
 from extractors._raster import save_png_overlay
 from logutil import log
@@ -62,10 +62,12 @@ HHR_WORKERS = 3
 _thread_locals = threading.local()
 
 # Regiones (id_region de dpa_limites.dpa_region_subdere) que entran en
-# el bbox del proyecto: Metropolitana a Los Lagos. Mismo listado del
-# spec para que la agregacion por comuna cubra la misma zona que los
-# rasters.
-CHOROPLETH_REGION_IDS = (13, 6, 7, 16, 8, 9, 14, 10)
+# el bbox del proyecto: Coquimbo a Magallanes (actualizado el
+# 2026-07-19; el bbox se habia ampliado en ingest.py::REGION_BBOX el
+# 2026-07-18 de Metropolitana a Los Lagos a este rango mas amplio, pero
+# esta lista se quedo con el set viejo de 8 regiones, dejando fuera del
+# calculo de coropletas a Coquimbo, Valparaiso, Aysen y Magallanes).
+CHOROPLETH_REGION_IDS = (4, 5, 13, 6, 7, 16, 8, 9, 14, 10, 11, 12)
 
 _comuna_cache = None
 
@@ -314,10 +316,7 @@ def _comuna_geometries(engine=None) -> list[tuple[int, dict]]:
     else:
         from db import get_engine
 
-        config = dict(load_config())
-        config["DB_USER"] = config["DB_APP_USER"]
-        config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-        with get_engine(config) as own_engine:
+        with get_engine(app_role_config()) as own_engine:
             with own_engine.connect() as conn:
                 records = conn.execute(query, params).fetchall()
 

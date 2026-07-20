@@ -15,6 +15,7 @@ from pathlib import Path
 # Agrega la raiz del proyecto al path de importacion, usando pathlib
 # en vez de os.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "management"))
 
 from create_role import frontal_sur_app_role_sql
 

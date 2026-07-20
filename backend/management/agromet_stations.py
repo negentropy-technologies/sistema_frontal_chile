@@ -13,15 +13,18 @@ bloquea sondeos repetidos; la red cambia poco, y actualizar el seed
 es regenerar el CSV.
 
 Uso:
-    .venv/bin/python backend/agromet_stations.py
+    .venv/bin/python backend/management/agromet_stations.py
 """
 
 import csv
+import sys
 from pathlib import Path
 
-from db import get_engine, load_config, upsert
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-SEED_PATH = Path(__file__).resolve().parent / "seeds" / "agromet_estaciones.csv"
+from db import app_role_config, get_engine, upsert
+
+SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "agromet_estaciones.csv"
 
 
 def load_stations(seed_path: Path = SEED_PATH) -> list[dict]:
@@ -74,10 +77,7 @@ def assign_comunas(engine, table: str) -> int:
 
 def run() -> None:
     rows = load_stations()
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-    with get_engine(config) as engine:
+    with get_engine(app_role_config()) as engine:
         count = upsert(engine, "frontal_sur.agromet_stations", rows, ["cod_estacion"], {"geometria": 4326})
         asignadas = assign_comunas(engine, "frontal_sur.agromet_stations")
     print(f"{count} estaciones Agromet upserteadas en frontal_sur.agromet_stations, {asignadas} con comuna_id")

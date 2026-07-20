@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import rasterio
 from sqlalchemy import text
 
-from db import get_engine, load_config, upsert
+from db import app_role_config, get_engine, upsert
 from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dga, dmc, gee, nasa_imerg
 from extractors._raster import save_png_overlay
 from logutil import log
@@ -49,11 +49,14 @@ REGION_BBOX = (-118.5, -57.0, -65.5, -28.5)
 MIN_DAYS = 1
 MAX_DAYS = 90
 
-# Techo de workers concurrentes para dga (ver extractors/dga.py):
-# verificado en vivo el 2026-07-19 que dgasat tolera 4 sesiones
-# simultaneas limpio, pero con 10 devuelve 500 en el 100% de los
-# casos. No subir sin volver a probar en vivo primero.
-MAX_DGA_WORKERS = 4
+# Techo de workers concurrentes para dga/dmc/agromet (ver
+# extractors/dga.py, dmc.py, agromet.py): verificado en vivo el
+# 2026-07-19 que dgasat tolera 4 sesiones simultaneas limpio pero con
+# 10 devuelve 500 en el 100% de los casos; el mismo dia se probaron 4
+# sesiones concurrentes contra climatologia.meteochile.gob.cl (dmc) y
+# agromet.cl (agromet), ambas sin bloqueo. No subir sin volver a
+# probar en vivo primero.
+MAX_SOURCE_WORKERS = 4
 # Ventana por defecto del pipeline cuando no se pasa --days ni
 # --start/--end. Unico lugar donde vive ese numero: todo lo demas se
 # deriva de la ventana [start, end] que arma main().
@@ -85,22 +88,33 @@ def _fetch_choropleth_windows(start: datetime, end: datetime, engine) -> list[di
 
 
 # Precipitacion diaria por estacion en la ventana, una fila por
-# (dia, fuente): SUM para dga/agromet (parametros instantaneos/horarios
-# que hay que acumular) y MAX para dmc (agua_caida_24_horas ya es un
-# acumulado de 24h, tomar el ultimo/mayor valor del dia lo aproxima sin
-# duplicar). Se arma con un UNION ALL de tres CTEs en vez de un JOIN
-# entre las tres tablas: no comparten cadencia horaria ni existe una
-# clave natural para cruzarlas fila a fila, un JOIN ahi produciria un
-# producto cruzado erroneo. Costo: un aggregate scan por tabla acotado
-# por el rango [:start, :end] usando el indice *_datos_momento_idx ya
-# existente, no un full scan.
+# (dia, fuente): SUM para dga/agromet y MAX para dmc (agua_caida_24_horas
+# ya es un acumulado de 24h, tomar el ultimo/mayor valor del dia lo
+# aproxima sin duplicar). Se arma con un UNION ALL de tres CTEs en vez
+# de un JOIN entre las tres tablas: no comparten cadencia horaria ni
+# existe una clave natural para cruzarlas fila a fila, un JOIN ahi
+# produciria un producto cruzado erroneo. Costo: un aggregate scan por
+# tabla acotado por el rango [:start, :end] usando el indice
+# *_datos_momento_idx ya existente, no un full scan.
+#
+# dga_diario usa precipitacion_instantanea (parametro 13 de dgasat), NO
+# precipitacion_acumulada (parametro 3): verificado en vivo el
+# 2026-07-19 que "acumulada" es un contador que nunca se reinicia (una
+# estacion se mantuvo en 410.5 mm constante durante 5 dias seguidos,
+# y siguio subiendo despues sin volver a cero), asi que sumarlo por
+# dia multiplicaba el valor real por la cantidad de lecturas del dia
+# (48 lecturas de 410.5 mm sumaron 19704 mm, un outlier que disparo el
+# IDW de anomaly.py a valores de miles de mm). "instantanea" si es el
+# incremento real por lectura: su SUM diario coincide con el delta real
+# del contador acumulado entre dos dias consecutivos (25.7 mm vs 25.7 mm
+# verificado el 07-16, 55.5 mm vs 55.2 mm el 07-17).
 ANOMALIA_ESTACIONES_SQL = """
 WITH dga_diario AS (
     SELECT s.geometria AS geom, d.momento::date AS dia,
-           SUM(d.precipitacion_acumulada) AS valor
+           SUM(d.precipitacion_instantanea) AS valor
     FROM frontal_sur.dga_datos d
     JOIN frontal_sur.dga_stations s ON s.id = d.estacion_id
-    WHERE d.momento BETWEEN :start AND :end AND d.precipitacion_acumulada IS NOT NULL
+    WHERE d.momento BETWEEN :start AND :end AND d.precipitacion_instantanea IS NOT NULL
     GROUP BY s.geometria, d.momento::date
 ),
 dmc_diario AS (
@@ -311,6 +325,54 @@ SOURCES = [
 ]
 
 
+def print_status(engine) -> None:
+    """
+    Reporte de solo lectura del estado de la ingesta: hasta que fecha
+    hay datos en cada fuente (BD y disco) y el resultado de la ultima
+    corrida registrada de cada una. Agregados baratos sobre columnas ya
+    indexadas (*_datos_momento_idx, UNIQUE de frames_raster), no un
+    full scan. No abre ningun tunel nuevo: usa el engine que ya paso
+    main().
+    """
+    with engine.connect() as conn:
+        print("-- estaciones (min/max momento en BD) --")
+        for tabla in ("dga_datos", "dmc_datos", "agromet_datos"):
+            fila = conn.execute(text(
+                f"SELECT min(momento), max(momento), count(*) FROM frontal_sur.{tabla}"
+            )).fetchone()
+            print(f"{tabla:15s} {fila[0]} -> {fila[1]}  ({fila[2]} filas)")
+
+        print("\n-- frames_raster (min/max valid_time por variable) --")
+        filas = conn.execute(text(
+            "SELECT source, variable, min(valid_time), max(valid_time), count(*) "
+            "FROM frontal_sur.frames_raster GROUP BY source, variable ORDER BY source, variable"
+        )).fetchall()
+        for source, variable, first, last, n in filas:
+            print(f"{source:15s} {variable:28s} {first} -> {last}  ({n} filas)")
+
+        print("\n-- ultima corrida registrada por fuente --")
+        filas = conn.execute(text(
+            "SELECT DISTINCT ON (source) source, started_at, status, error "
+            "FROM frontal_sur.ingest_runs ORDER BY source, started_at DESC"
+        )).fetchall()
+        for source, started_at, status, error in filas:
+            linea = f"{source:15s} {status:6s} inicio={started_at}"
+            if error:
+                linea += f"  error={error[:80]}"
+            print(linea)
+
+    print("\n-- CHIRPS prelim en disco --")
+    prelim_dir = chirps.DATA_DIR / "chirps_precipitation"
+    dias = sorted(p.stem[:8] for p in prelim_dir.glob("*.tif")) if prelim_dir.exists() else []
+    print(f"{len(dias)} dias" + (f", {dias[0]} -> {dias[-1]}" if dias else ""))
+
+    print("\n-- climatologia CHIRPS cacheada --")
+    clima_dir = chirps_climatology.DATA_DIR
+    dias_clima = sorted(p.name for p in clima_dir.iterdir()) if clima_dir.exists() else []
+    archivos_clima = len(list(clima_dir.glob("*/*.tif"))) if clima_dir.exists() else 0
+    print(f"{len(dias_clima)} dias-del-anio con cache ({archivos_clima} archivos anio-dia en total)")
+
+
 def parse_days(raw: str) -> int:
     """
     Valida --days como entero entre MIN_DAYS y MAX_DAYS. Es el unico
@@ -329,30 +391,18 @@ def parse_days(raw: str) -> int:
 
 def parse_workers(raw: str) -> int:
     """
-    Valida --workers como entero entre 1 y MAX_DGA_WORKERS. Mismo
+    Valida --workers como entero entre 1 y MAX_SOURCE_WORKERS. Mismo
     criterio que parse_days: input externo, se valida antes de
-    llegar a dga.fetch_batches para no repetir por error la corrida
-    de 10 workers que devolvio 500 en el 100% de los casos.
+    llegar a fetch_batches para no repetir por error la corrida de 10
+    workers que devolvio 500 en el 100% de los casos contra dgasat.
     """
     try:
         workers = int(raw)
     except ValueError:
         raise ValueError(f"--workers debe ser un entero, se recibio {raw!r}")
-    if not (1 <= workers <= MAX_DGA_WORKERS):
-        raise ValueError(f"--workers debe estar entre 1 y {MAX_DGA_WORKERS}, se recibio {workers}")
+    if not (1 <= workers <= MAX_SOURCE_WORKERS):
+        raise ValueError(f"--workers debe estar entre 1 y {MAX_SOURCE_WORKERS}, se recibio {workers}")
     return workers
-
-
-def _app_role_config() -> dict:
-    """
-    Arma la config de conexion con el rol acotado frontal_sur_app en
-    vez del superusuario (DB_USER/DB_PASSWORD), tal como se verifico a
-    mano en la Tarea 3 del plan de esquema de BD.
-    """
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-    return config
 
 
 def parse_date(raw: str) -> datetime:
@@ -388,14 +438,14 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
     ventana en una sola llamada (no hay "estacion por estacion" que
     retomar) y una corrida cortada se relanza completa.
 
-    workers solo aplica a dga (unica fuente con soporte de scraping
-    concurrente por ahora, ver extractors/dga.py::fetch_batches):
-    verificado en vivo el 2026-07-19 que 4 workers corren limpios
-    contra dgasat pero 10 hacen que el portal devuelva 500 en el 100%
-    de los casos. dmc y agromet ignoran este parametro (todavia
-    secuenciales).
+    workers aplica a dga, dmc y agromet (las tres fuentes de scraping
+    por estacion, ver fetch_batches de cada extractor): verificado en
+    vivo el 2026-07-19 que 4 workers corren limpios contra las tres
+    (dgasat, climatologia.meteochile.gob.cl, agromet.cl); con 10,
+    dgasat devuelve 500 en el 100% de los casos (no probado a esa
+    escala en dmc/agromet, no subir de 4 sin volver a probar en vivo).
     """
-    config = _app_role_config()
+    config = app_role_config()
 
     # Con "sources" se corre solo el subconjunto pedido, para relanzar
     # fuentes puntuales (por ejemplo tras un corte de la base) sin
@@ -418,7 +468,7 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
             kwargs = {}
             if resume_after is not None:
                 kwargs["resume_after"] = resume_after
-            if workers != 1 and name == "dga":
+            if workers != 1:
                 kwargs["workers"] = workers
             return lambda s, e, en, mod=mod, kwargs=kwargs: mod.fetch_batches(s, e, REGION_BBOX, en, **kwargs)
 
@@ -495,8 +545,14 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
     parser.add_argument("--sources", default=None, help="lista separada por comas para correr solo esas fuentes (ej: dga,chirps); default: todas")
     parser.add_argument("--resume-after", default=None, help="codigo de la ultima estacion confirmada upserteada en el log (cod_bna/cod_estacion segun la fuente); retoma el catalogo despues de esa estacion (usar junto con --sources dga|dmc|agromet)")
-    parser.add_argument("--workers", default="1", help=f"estaciones dga scrapeadas en simultaneo, entre 1 y {MAX_DGA_WORKERS} (verificado en vivo el 2026-07-19: con 10 dgasat devuelve 500 en el 100% de los casos; default: 1, secuencial)")
+    parser.add_argument("--workers", default="1", help=f"estaciones scrapeadas en simultaneo (dga/dmc/agromet), entre 1 y {MAX_SOURCE_WORKERS} (verificado en vivo el 2026-07-19 en las tres fuentes; con 10 dgasat devuelve 500 en el 100% de los casos; default: 1, secuencial)")
+    parser.add_argument("--status", action="store_true", help="solo reporta hasta que fecha hay datos por fuente (BD y disco) y la ultima corrida registrada; no ingesta nada")
     args = parser.parse_args()
+
+    if args.status:
+        with get_engine(app_role_config()) as engine:
+            print_status(engine)
+        return
 
     # Dos modos de ventana: --days (relativa al presente, para el cron)
     # o --start/--end (fechas definidas, para backfill puntual). Son

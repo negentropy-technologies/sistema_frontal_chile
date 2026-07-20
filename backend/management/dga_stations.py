@@ -16,16 +16,19 @@ los 1773 codigos del formulario dgasat: 1772 calzan y el restante es
 un error de la propia pagina).
 
 Uso:
-    .venv/bin/python backend/dga_stations.py
+    .venv/bin/python backend/management/dga_stations.py
 """
 
 import csv
+import sys
 from pathlib import Path
 
-from agromet_stations import assign_comunas
-from db import get_engine, load_config, upsert
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-SEED_PATH = Path(__file__).resolve().parent / "seeds" / "dga_estaciones.csv"
+from agromet_stations import assign_comunas
+from db import app_role_config, get_engine, upsert
+
+SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "dga_estaciones.csv"
 
 
 def load_stations(seed_path: Path = SEED_PATH) -> list[dict]:
@@ -58,10 +61,7 @@ def load_stations(seed_path: Path = SEED_PATH) -> list[dict]:
 
 def run() -> None:
     rows = load_stations()
-    config = dict(load_config())
-    config["DB_USER"] = config["DB_APP_USER"]
-    config["DB_PASSWORD"] = config["DB_APP_PASSWORD"]
-    with get_engine(config) as engine:
+    with get_engine(app_role_config()) as engine:
         count = upsert(engine, "frontal_sur.dga_stations", rows, ["cod_bna"], {"geometria": 4326})
         asignadas = assign_comunas(engine, "frontal_sur.dga_stations")
     print(f"{count} estaciones DGA upserteadas en frontal_sur.dga_stations, {asignadas} con comuna_id")

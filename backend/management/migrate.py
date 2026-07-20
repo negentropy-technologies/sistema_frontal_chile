@@ -7,10 +7,13 @@ orden por su nombre, y registrados en la propia base de datos, en la
 tabla frontal_sur.schema_migrations. Correrlo dos veces sin cambios en
 migrations/ no hace nada la segunda vez (idempotente).
 
-Correr con: .venv/bin/python migrate.py
+Correr con: .venv/bin/python backend/management/migrate.py
 """
 
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import text
 
@@ -18,7 +21,7 @@ from db import get_engine
 
 # Directorio con los archivos .sql de migracion, relativo a este
 # archivo (no al directorio de trabajo actual).
-MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
 
 
 def pending_migrations(migrations_dir: Path, applied: set[str]) -> list[Path]:

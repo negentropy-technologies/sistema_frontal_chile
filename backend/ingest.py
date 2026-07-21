@@ -57,6 +57,14 @@ MAX_DAYS = 90
 # agromet.cl (agromet), ambas sin bloqueo. No subir sin volver a
 # probar en vivo primero.
 MAX_SOURCE_WORKERS = 4
+
+# Fuentes de scraping estacion-por-estacion (ver ids_con_datos en
+# db.py y el filtro automatico en cada fetch_batches): ya se saltan
+# solo las estaciones con datos, asi que el upsert de estas tres no
+# necesita ademas actualizar filas existentes. insert-only (DO
+# NOTHING en vez de DO UPDATE) es mas rapido y no le toca nada a lo
+# que ya quedo escrito.
+FUENTES_INSERT_ONLY = {"dga", "dmc", "agromet"}
 # Ventana por defecto del pipeline cuando no se pasa --days ni
 # --start/--end. Unico lugar donde vive ese numero: todo lo demas se
 # deriva de la ventana [start, end] que arma main().
@@ -490,12 +498,14 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
                     count = 0
                     for batch in result:
                         if not dry_run:
-                            upsert(engine, table, batch, conflict_cols, geom_cols)
+                            upsert(engine, table, batch, conflict_cols, geom_cols,
+                                   do_nothing=name in FUENTES_INSERT_ONLY)
                         count += len(batch)
                         log(f"{name}: lote de {len(batch)} filas" + (" (dry-run)" if dry_run else " upserteado"))
                 else:
                     if not dry_run:
-                        upsert(engine, table, result, conflict_cols, geom_cols)
+                        upsert(engine, table, result, conflict_cols, geom_cols,
+                               do_nothing=name in FUENTES_INSERT_ONLY)
                     count = len(result)
                 status = "ok"
                 error = None

@@ -43,6 +43,7 @@ from zoneinfo import ZoneInfo
 
 import requests
 
+from db import ids_con_datos
 from extractors._http import build_session
 from logutil import log
 
@@ -395,8 +396,14 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
 
     resume_after: cod_bna de la ultima estacion confirmada upserteada
     en una corrida previa de la MISMA ventana (ver log del pipeline);
-    salta el catalogo hasta despues de esa estacion en vez de volver a
-    scrapear las ~1000 que ya quedaron persistidas.
+    salta el catalogo hasta despues de esa estacion. Opcional: aunque
+    no se pase, el catalogo igual se filtra automaticamente contra
+    dga_datos (ver ids_con_datos en db.py) para saltarse las
+    estaciones que YA tienen datos en esta ventana exacta, esten donde
+    esten en el catalogo (no solo un prefijo contiguo) -- asi una
+    corrida cortada a mitad de camino por varios workers concurrentes
+    (que no escriben en orden de catalogo) no obliga a re-scrapear todo
+    lo que ya quedo bien.
 
     workers: cantidad de estaciones scrapeadas en simultaneo (default
     1 = secuencial, comportamiento identico al de antes). Con 4 se
@@ -427,6 +434,13 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     stations = _skip_to_resume(stations, resume_after)
     if resume_after is not None:
         log(f"dga: retomando despues de {resume_after}, {len(stations)} estaciones restantes")
+
+    ya_con_datos = ids_con_datos(engine, "frontal_sur.dga_datos", "estacion_id",
+                                  [sid for sid, _ in stations], start, end)
+    if ya_con_datos:
+        antes = len(stations)
+        stations = [(sid, cod) for sid, cod in stations if sid not in ya_con_datos]
+        log(f"dga: {antes - len(stations)} de {antes} estaciones ya tienen datos en esta ventana, se omiten")
 
     fecha_ini = start.astimezone(TZ_CHILE).strftime("%d/%m/%Y")
     fecha_fin = end.astimezone(TZ_CHILE).strftime("%d/%m/%Y")

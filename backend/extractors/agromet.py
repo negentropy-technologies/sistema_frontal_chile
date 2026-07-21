@@ -30,6 +30,7 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from db import ids_con_datos
 from extractors._http import build_session
 from logutil import log
 
@@ -250,7 +251,12 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
 
     resume_after: cod_estacion de la ultima estacion confirmada
     upserteada en una corrida previa de la MISMA ventana; salta el
-    catalogo hasta despues de esa estacion.
+    catalogo hasta despues de esa estacion. Opcional: el catalogo
+    tambien se filtra siempre contra agromet_datos (ver ids_con_datos
+    en db.py) para saltarse automaticamente las estaciones que ya
+    tienen datos en esta ventana exacta, esten donde esten en el
+    catalogo (ver dga.py para el detalle de por que esto hace falta
+    con workers concurrentes).
 
     workers: cantidad de estaciones scrapeadas en simultaneo (default
     1 = secuencial, comportamiento identico al de antes). Verificado en
@@ -264,6 +270,13 @@ def fetch_batches(start: datetime, end: datetime, bbox: tuple, engine, resume_af
     stations = _skip_to_resume(stations, resume_after)
     if resume_after is not None:
         log(f"agromet: retomando despues de {resume_after}, {len(stations)} estaciones restantes")
+
+    ya_con_datos = ids_con_datos(engine, "frontal_sur.agromet_datos", "ema_id",
+                                  [sid for sid, _ in stations], start, end)
+    if ya_con_datos:
+        antes = len(stations)
+        stations = [(sid, cod) for sid, cod in stations if sid not in ya_con_datos]
+        log(f"agromet: {antes - len(stations)} de {antes} estaciones ya tienen datos en esta ventana, se omiten")
 
     # La API construye su grilla horaria arrastrando los minutos y
     # segundos del request (pedir dateFrom=..:42:24 genera slots a las

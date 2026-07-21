@@ -29,7 +29,7 @@ import rasterio
 from sqlalchemy import text
 
 from db import app_role_config, get_engine, upsert
-from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dga, dmc, gee, nasa_imerg
+from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dga, dmc, gee, nasa_imerg, sentinel1
 from extractors._raster import save_png_overlay
 from logutil import log
 
@@ -324,6 +324,30 @@ SOURCES = [
         ["source", "variable", "region", "valid_time"],
         None,
     ),
+    (
+        # sentinel1 no usa REGION_BBOX: se filtra por el poligono real
+        # de UNA region (dpa_limites.dpa_region_subdere), pasada por
+        # --s1-region, porque cada escena pesa ~1-2 GB y bajar todo el
+        # bbox del proyecto no tiene sentido. A diferencia de las
+        # demas fuentes, no escribe nada en la BD (ver
+        # extractors/sentinel1.fetch_batches): solo descarga y
+        # descomprime en disco, para un script de procesamiento
+        # aparte. table/conflict_cols/geom_cols quedan aqui solo para
+        # calzar con la forma de la tupla; nunca se usan porque
+        # fetch_batches siempre devuelve una lista vacia. El fetch_fn
+        # de aqui es un placeholder que falla explicito: run() lo
+        # reemplaza por un closure con --s1-region/--s1-pass/
+        # --s1-plataformas/--s1-tipo apenas "sentinel1" este en la
+        # seleccion de fuentes (ver el bloque de wiring en run(),
+        # mismo mecanismo que ya usan resume_after/workers para
+        # dga/dmc/agromet).
+        "sentinel1",
+        lambda start, end, engine: (_ for _ in ()).throw(
+            RuntimeError("sentinel1 deberia haber sido reemplazado por run(), ver bloque de wiring")),
+        "frontal_sur.frames_raster",
+        ["source", "variable", "region", "valid_time"],
+        None,
+    ),
     # flood_hub queda fuera de SOURCES: ver "Flood Hub, diferido a un
     # plan separado" en el plan de implementacion. Cuando llegue el
     # acceso, agregar aqui una entrada igual a las demas (funcion
@@ -425,8 +449,53 @@ def parse_date(raw: str) -> datetime:
         raise ValueError(f"la fecha debe ser YYYY-MM-DD, se recibio {raw!r}")
 
 
+def parse_s1_pass(raw: str | None) -> str | None:
+    """
+    Valida --s1-pass contra las dos direcciones de orbita reales de
+    Sentinel-1 (ver extractors/sentinel1.ORBITAS_VALIDAS). None (flag
+    no pasado) trae ambas direcciones, es un valor valido a proposito.
+    """
+    if raw is None:
+        return None
+    valor = raw.strip().upper()
+    if valor not in sentinel1.ORBITAS_VALIDAS:
+        raise ValueError(f"--s1-pass debe ser {sorted(sentinel1.ORBITAS_VALIDAS)}, se recibio {raw!r}")
+    return valor
+
+
+def parse_s1_plataformas(raw: str | None) -> set[str] | None:
+    """
+    Valida --s1-plataformas (letras separadas por coma, ej "C,D")
+    contra las plataformas reales de la constelacion Sentinel-1 (ver
+    extractors/sentinel1.PLATAFORMAS_VALIDAS). S1B esta fuera de
+    servicio desde 2021 pero se acepta igual por si se pide historico.
+    None (flag no pasado) trae todas.
+    """
+    if raw is None:
+        return None
+    plataformas = {letra.strip().upper() for letra in raw.split(",") if letra.strip()}
+    desconocidas = plataformas - sentinel1.PLATAFORMAS_VALIDAS
+    if desconocidas:
+        raise ValueError(f"--s1-plataformas invalidas: {sorted(desconocidas)}; validas: {sorted(sentinel1.PLATAFORMAS_VALIDAS)}")
+    return plataformas
+
+
+def parse_s1_tipo(raw: str) -> str:
+    """
+    Valida --s1-tipo contra los dos productos nivel 1 de Sentinel-1:
+    GRD (backscatter, el default para change detection por
+    intensidad) y SLC (amplitud+fase, para InSAR).
+    """
+    valor = raw.strip().upper()
+    if valor not in sentinel1.TIPOS_VALIDOS:
+        raise ValueError(f"--s1-tipo debe ser {sorted(sentinel1.TIPOS_VALIDOS)}, se recibio {raw!r}")
+    return valor
+
+
 def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None,
-        resume_after: str | None = None, workers: int = 1) -> None:
+        resume_after: str | None = None, workers: int = 1,
+        s1_region: str | None = None, s1_pass: str | None = None,
+        s1_plataformas: set[str] | None = None, s1_tipo: str = "GRD") -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -452,6 +521,25 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
     (dgasat, climatologia.meteochile.gob.cl, agromet.cl); con 10,
     dgasat devuelve 500 en el 100% de los casos (no probado a esa
     escala en dmc/agromet, no subir de 4 sin volver a probar en vivo).
+
+    s1_region/s1_pass/s1_plataformas/s1_tipo solo aplican a la fuente
+    sentinel1 (ver extractors/sentinel1.fetch_batches): a diferencia
+    del resto, esta fuente no corre sola con la ventana [start, end],
+    necesita ademas la region (nombre real de
+    dpa_limites.dpa_region_subdere) porque cada escena pesa ~1-2 GB.
+    s1_region es obligatorio si "sentinel1" esta en la seleccion de
+    fuentes; el resto son opcionales (None/default trae todo). Esta
+    fuente tampoco escribe nada en la BD (fetch_batches siempre
+    devuelve una lista vacia): solo deja las escenas descomprimidas en
+    disco para que un script de procesamiento aparte las use. A
+    diferencia de las demas fuentes (donde dry_run solo salta el
+    upsert y el fetch igual corre completo), sentinel1 SI respeta
+    dry_run dentro de su propio fetch_batches y no descarga nada: su
+    efecto secundario es bajar 1-2 GB por escena, muy caro para el
+    criterio "liviano" que asume el dry-run del resto del pipeline
+    (ver el incidente del 2026-07-21: un --dry-run sin este flag
+    alcanzo a bajar y descomprimir una escena completa antes de poder
+    cortarlo a mano).
     """
     config = app_role_config()
 
@@ -482,6 +570,24 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
 
         seleccion = [
             (name, _con_resume_y_workers(name, fetch_fn), table, conflict_cols, geom_cols)
+            for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
+        ]
+
+    if any(name == "sentinel1" for name, *_ in seleccion):
+        # Se valida aca (antes de abrir el tunel) para no gastar una
+        # conexion SSH si falta el parametro obligatorio: mismo
+        # criterio que parse_workers/parse_date, fallar rapido con un
+        # mensaje claro en vez de que sentinel1 reviente mas abajo con
+        # el RuntimeError generico del placeholder en SOURCES.
+        if s1_region is None:
+            raise ValueError("--sources sentinel1 necesita --s1-region (nombre de dpa_limites.dpa_region_subdere)")
+        seleccion = [
+            (name,
+             (lambda s, e, en: sentinel1.fetch_batches(
+                 s, e, s1_region, en, orbit_pass=s1_pass, plataformas=s1_plataformas,
+                 producto_tipo=s1_tipo, dry_run=dry_run))
+             if name == "sentinel1" else fetch_fn,
+             table, conflict_cols, geom_cols)
             for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
         ]
 
@@ -555,8 +661,12 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true", help="hace fetch sin escribir a la BD")
     parser.add_argument("--sources", default=None, help="lista separada por comas para correr solo esas fuentes (ej: dga,chirps); default: todas")
     parser.add_argument("--resume-after", default=None, help="codigo de la ultima estacion confirmada upserteada en el log (cod_bna/cod_estacion segun la fuente); retoma el catalogo despues de esa estacion (usar junto con --sources dga|dmc|agromet)")
-    parser.add_argument("--workers", default="1", help=f"estaciones scrapeadas en simultaneo (dga/dmc/agromet), entre 1 y {MAX_SOURCE_WORKERS} (verificado en vivo el 2026-07-19 en las tres fuentes; con 10 dgasat devuelve 500 en el 100% de los casos; default: 1, secuencial)")
+    parser.add_argument("--workers", default="1", help=f"estaciones scrapeadas en simultaneo (dga/dmc/agromet), entre 1 y {MAX_SOURCE_WORKERS} (verificado en vivo el 2026-07-19 en las tres fuentes; con 10 dgasat devuelve 500 en el 100%% de los casos; default: 1, secuencial)")
     parser.add_argument("--status", action="store_true", help="solo reporta hasta que fecha hay datos por fuente (BD y disco) y la ultima corrida registrada; no ingesta nada")
+    parser.add_argument("--s1-region", default=None, help="nombre de region en dpa_limites.dpa_region_subdere (ej: Coquimbo); obligatorio con --sources sentinel1")
+    parser.add_argument("--s1-pass", default=None, help="ASCENDING o DESCENDING; default: ambas orbitas (solo aplica a --sources sentinel1)")
+    parser.add_argument("--s1-plataformas", default=None, help="letras de plataforma separadas por coma, ej: C,D; default: todas (A/B/C/D; solo aplica a --sources sentinel1)")
+    parser.add_argument("--s1-tipo", default="GRD", help="GRD (backscatter, default) o SLC (amplitud+fase, InSAR); solo aplica a --sources sentinel1")
     args = parser.parse_args()
 
     if args.status:
@@ -581,8 +691,12 @@ def main() -> None:
 
     sources = args.sources.split(",") if args.sources else None
     workers = parse_workers(args.workers)
+    s1_pass = parse_s1_pass(args.s1_pass)
+    s1_plataformas = parse_s1_plataformas(args.s1_plataformas)
+    s1_tipo = parse_s1_tipo(args.s1_tipo)
     run(start=start, end=end, dry_run=args.dry_run, sources=sources,
-        resume_after=args.resume_after, workers=workers)
+        resume_after=args.resume_after, workers=workers,
+        s1_region=args.s1_region, s1_pass=s1_pass, s1_plataformas=s1_plataformas, s1_tipo=s1_tipo)
 
 
 if __name__ == "__main__":

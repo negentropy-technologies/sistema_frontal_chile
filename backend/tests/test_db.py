@@ -18,7 +18,14 @@ from pathlib import Path
 # el proyecto como paquete. Se usa pathlib en vez de os.path.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from db import app_role_config, build_db_url, build_ssh_tunnel_kwargs, build_upsert_sql
+from db import (
+    app_role_config,
+    build_db_url,
+    build_ids_con_datos_sql,
+    build_ssh_tunnel_kwargs,
+    build_upsert_sql,
+    build_upsert_template,
+)
 
 
 def test_build_db_url():
@@ -49,29 +56,53 @@ def test_build_ssh_tunnel_kwargs():
 
 
 def test_build_upsert_sql_plain():
-    # Caso sin columnas de geometria: el upsert es un INSERT ...
-    # ON CONFLICT ... DO UPDATE plano, todas las columnas menos las
-    # de conflicto se actualizan con el valor entrante (EXCLUDED).
+    # build_upsert_sql ahora arma el SQL para execute_values: un unico
+    # placeholder "VALUES %s" (execute_values lo reemplaza por N tuplas
+    # en un solo round-trip), no un INSERT de una fila por :col.
     sql = build_upsert_sql("frontal_sur.ingest_runs", ["id", "source", "status"], ["id"])
     assert sql == (
         "INSERT INTO frontal_sur.ingest_runs (id, source, status) "
-        "VALUES (:id, :source, :status) "
+        "VALUES %s "
         "ON CONFLICT (id) DO UPDATE SET source = EXCLUDED.source, status = EXCLUDED.status"
     )
 
 
-def test_build_upsert_sql_with_geom():
-    # Caso con una columna de geometria: en vez de bindear el valor
-    # directo, la columna debe envolverse en ST_GeomFromText(:col, srid)
-    # para que Postgres/PostGIS lo interprete como geometria y no texto.
-    sql = build_upsert_sql(
-        "frontal_sur.station_obs",
+def test_build_upsert_sql_do_nothing():
+    # do_nothing=True: ON CONFLICT DO NOTHING, sin SET ni EXCLUDED.
+    # Las filas ya existentes no se tocan, solo se insertan las nuevas.
+    sql = build_upsert_sql("frontal_sur.dga_datos", ["estacion_id", "momento", "caudal"],
+                            ["estacion_id", "momento"], conflict_do_nothing=True)
+    assert sql == (
+        "INSERT INTO frontal_sur.dga_datos (estacion_id, momento, caudal) "
+        "VALUES %s "
+        "ON CONFLICT (estacion_id, momento) DO NOTHING"
+    )
+
+
+def test_build_upsert_template_plain():
+    # Sin columnas de geometria: un placeholder con nombre por columna.
+    template = build_upsert_template(["id", "source", "status"])
+    assert template == "(%(id)s, %(source)s, %(status)s)"
+
+
+def test_build_upsert_template_with_geom():
+    # Con una columna de geometria: en vez de bindear el valor directo,
+    # la columna debe envolverse en ST_GeomFromText(%(col)s, srid) para
+    # que Postgres/PostGIS lo interprete como geometria y no texto.
+    template = build_upsert_template(
         ["station_id", "geom", "value"],
-        ["station_id"],
         geom_cols={"geom": 4326},
     )
-    assert "ST_GeomFromText(:geom, 4326)" in sql
-    assert "VALUES (:station_id, ST_GeomFromText(:geom, 4326), :value)" in sql
+    assert template == "(%(station_id)s, ST_GeomFromText(%(geom)s, 4326), %(value)s)"
+
+
+def test_build_ids_con_datos_sql():
+    sql = build_ids_con_datos_sql("frontal_sur.dga_datos", "estacion_id")
+    assert sql == (
+        "SELECT estacion_id, count(DISTINCT date_trunc('day', momento)) "
+        "FROM frontal_sur.dga_datos WHERE estacion_id = ANY(:ids) "
+        "AND momento >= :start AND momento < :end GROUP BY estacion_id"
+    )
 
 
 def test_app_role_config_swaps_user_and_password():
@@ -88,6 +119,9 @@ if __name__ == "__main__":
     test_build_db_url()
     test_build_ssh_tunnel_kwargs()
     test_build_upsert_sql_plain()
-    test_build_upsert_sql_with_geom()
+    test_build_upsert_sql_do_nothing()
+    test_build_upsert_template_plain()
+    test_build_upsert_template_with_geom()
+    test_build_ids_con_datos_sql()
     test_app_role_config_swaps_user_and_password()
     print("OK: todos los tests de db.py pasaron")

@@ -111,26 +111,6 @@ def idw_residuals(
     return out.tolist()
 
 
-def compute_anomaly(
-    station_values: list[float],
-    background_at_stations: list[float],
-    background_grid: list[float],
-    station_coords: list[tuple[float, float]],
-    grid_coords: list[tuple[float, float]],
-    batch_size: int = DEFAULT_BATCH_SIZE,
-) -> list[float]:
-    """
-    Campo ajustado = fondo_en_grilla + IDW(observacion - fondo en cada
-    estacion). "Fondo" es CHIRPS prelim (el evento actual). Para
-    reportar una ANOMALIA respecto de la climatologia historica, el
-    caller resta aparte la climatologia del mismo dia-del-anio al
-    resultado de esta funcion (ver extractors/anomaly_raster.py).
-    """
-    residuals = (np.asarray(station_values) - np.asarray(background_at_stations)).tolist()
-    interpolated = idw_residuals(station_coords, residuals, grid_coords, batch_size=batch_size)
-    return (np.asarray(interpolated) + np.asarray(background_grid)).tolist()
-
-
 def elevation_trend(residuals: list[float], elevations: list[float]) -> tuple[float, float]:
     """
     Ajuste lineal residuo ~ elevacion por minimos cuadrados (grado 1,
@@ -167,8 +147,8 @@ def compute_anomaly_windowed(
     Punto 1 (prioridad alta) del prompt maestro de ajuste
     metodologico: el residuo se calcula sobre la ventana de 30 dias
     (suma de observacion y de fondo CHIRPS en cada estacion, no el dia
-    suelto) y se interpola con IDW igual que compute_anomaly. El campo
-    corregido de la ventana se desagrega al dia multiplicando por la
+    suelto) y se interpola con idw_residuals. El campo corregido de la
+    ventana se desagrega al dia multiplicando por la
     razon (CHIRPS crudo del dia / CHIRPS crudo de la ventana) en cada
     pixel: la forma diaria la sigue dando CHIRPS, solo el sesgo se
     corrige a la resolucion en que el metodo esta validado.

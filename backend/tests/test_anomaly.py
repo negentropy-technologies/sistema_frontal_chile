@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from anomaly import apply_dry_threshold, compute_anomaly, compute_anomaly_windowed, elevation_trend, idw_residuals
+from anomaly import apply_dry_threshold, compute_anomaly_windowed, elevation_trend, idw_residuals
 
 
 def test_idw_residuals_en_la_estacion_misma_devuelve_su_propio_residuo():
@@ -69,23 +69,6 @@ def test_idw_residuals_respeta_batch_size_pequeno():
     grid_coords = [(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)]
     result = idw_residuals(station_coords, residuals, grid_coords, batch_size=1)
     assert result == [10.0, 15.0, 20.0]
-
-
-def test_compute_anomaly_suma_residuo_interpolado_al_fondo():
-    # compute_anomaly = idw_residuals(obs - fondo_en_estacion) +
-    # fondo_en_grilla, tal como describe la seccion 3.2 de
-    # Ossa-Moreno et al. 2019: "this interpolated surface is added
-    # back to the original WC-CHIRPS values".
-    station_values = [15.0]
-    background_at_stations = [10.0]  # CHIRPS en la estacion: residuo = 5.0
-    background_grid = [8.0]
-    station_coords = [(0.0, 0.0)]
-    grid_coords = [(0.0, 0.0)]  # mismo punto: residuo interpolado = 5.0
-    result = compute_anomaly(
-        station_values, background_at_stations, background_grid,
-        station_coords, grid_coords,
-    )
-    assert result == [13.0]  # 8.0 (fondo en la grilla) + 5.0 (residuo)
 
 
 def test_compute_anomaly_windowed_desagrega_proporcional_al_chirps_diario():
@@ -173,7 +156,6 @@ if __name__ == "__main__":
     test_idw_residuals_mas_cerca_pesa_mas()
     test_idw_residuals_multiples_puntos_de_grilla_a_la_vez()
     test_idw_residuals_respeta_batch_size_pequeno()
-    test_compute_anomaly_suma_residuo_interpolado_al_fondo()
     test_compute_anomaly_windowed_desagrega_proporcional_al_chirps_diario()
     test_compute_anomaly_windowed_ventana_seca_da_cero()
     test_apply_dry_threshold_fuerza_a_cero_bajo_el_umbral()

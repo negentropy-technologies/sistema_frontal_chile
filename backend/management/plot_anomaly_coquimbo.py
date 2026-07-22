@@ -1,22 +1,23 @@
 """
 Plot RESUMEN (un solo mapa) de la anomalia acumulada de precipitacion
 para Coquimbo en todo el periodo: suma las anomalias DIARIAS ya
-calculadas por chirps_anomaly_coquimbo.py (cada una ya corregida por
-IDW de residuos + elevacion + umbral de lluvia espuria, ver
-extractors/anomaly_raster.py) -- sumar anomalias diarias ya calculadas
-es valido porque la anomalia es una cantidad lineal (observado menos
+calculadas por la fuente chirps_anomaly de ingest.py (cada una ya
+corregida por IDW de residuos + elevacion + umbral de lluvia espuria,
+ver extractors/anomaly_raster.py) y recorta el resultado al poligono
+real de Coquimbo -- sumar anomalias diarias ya calculadas es valido
+porque la anomalia es una cantidad lineal (observado menos
 climatologia), asi que la suma da el deficit/superavit TOTAL del
 periodo, igual que sumar los dias de un mes da el total del mes.
 
 Reusa mask_to_region/crop_to_bbox/reproject_to_utm de plot_anomaly.py
 (mismo recorte a POLIGONO real + reproyeccion UTM que el plot
-nacional). Los GeoTIFF diarios individuales quedan en disco para el
-pipeline (una fila por dia en frontal_sur.frames_raster, animable en
-el mapa web); este script es solo para revision humana del evento
-completo.
+nacional). Lee los mismos GeoTIFF diarios que ya escribe ingest.py en
+ANOMALY_DIR (frontal_sur.frames_raster los indexa, animable en el
+mapa web); este script es solo para revision humana del evento
+completo, no una fuente aparte.
 
 Uso:
-    .venv/bin/python backend/management/plot_anomaly_coquimbo.py <carpeta de chirps_anomaly_coquimbo> <png de salida>
+    .venv/bin/python backend/management/plot_anomaly_coquimbo.py <png de salida>
 """
 
 import sys
@@ -30,6 +31,7 @@ from matplotlib.colors import TwoSlopeNorm
 
 from db import app_role_config, get_engine
 from management.plot_anomaly import (
+    ANOMALY_DIR,
     COLOR_DEFICIT,
     COLOR_SUPERAVIT,
     METODOLOGIA,
@@ -44,10 +46,10 @@ from management.plot_anomaly import (
 REGION_ID_COQUIMBO = 4
 
 
-def main(anomaly_dir: Path, png_path: Path) -> None:
-    dias = load_anomaly_days(anomaly_dir)
+def main(png_path: Path) -> None:
+    dias = load_anomaly_days(ANOMALY_DIR)
     if not dias:
-        print(f"sin GeoTIFF de anomalia en {anomaly_dir}")
+        print(f"sin GeoTIFF de anomalia en {ANOMALY_DIR}")
         return
 
     fechas = [f for f, _, _ in dias]
@@ -104,6 +106,6 @@ def main(anomaly_dir: Path, png_path: Path) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3:
-        sys.exit("uso: plot_anomaly_coquimbo.py <carpeta de chirps_anomaly_coquimbo> <png de salida>")
-    main(Path(sys.argv[1]), Path(sys.argv[2]))
+    if len(sys.argv) != 2:
+        sys.exit("uso: plot_anomaly_coquimbo.py <png de salida>")
+    main(Path(sys.argv[1]))

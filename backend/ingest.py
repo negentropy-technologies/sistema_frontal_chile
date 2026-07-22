@@ -1,8 +1,8 @@
 """
-Orquestador de ingesta: corre los extractores de GEE y NOAA NCEI, y
-escribe los resultados en frontal_sur via upsert, con el rol acotado
-frontal_sur_app (nunca el superusuario). Cada fuente corre en su
-propio try/except: si una falla, se registra el error en
+Orquestador de ingesta: corre los extractores de GEE, CHIRPS, DGA, DMC
+y Agromet, y escribe los resultados en frontal_sur via upsert, con el
+rol acotado frontal_sur_app (nunca el superusuario). Cada fuente corre
+en su propio try/except: si una falla, se registra el error en
 frontal_sur.ingest_runs y las demas siguen corriendo.
 
 DMC y Google Flood Hub quedan fuera de este orquestador (ver plan de

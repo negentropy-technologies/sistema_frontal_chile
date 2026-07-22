@@ -1,10 +1,10 @@
 """
 Sesion HTTP compartida con reintentos y backoff automaticos, reusada
-por los extractores que hacen llamadas HTTP planas (NOAA NCEI, Google
-Flood Forecasting API cuando llegue el acceso). Usa
-urllib3.util.retry.Retry, que ya viene instalado como dependencia
-transitiva de "requests" (sin agregar ninguna libreria nueva): un solo
-lugar centraliza esta logica en vez de duplicarla en cada extractor.
+por los extractores que hacen llamadas HTTP planas (dmc, agromet, dga,
+chirps, chirps_climatology, nasa_imerg). Usa urllib3.util.retry.Retry,
+que ya viene instalado como dependencia transitiva de "requests" (sin
+agregar ninguna libreria nueva): un solo lugar centraliza esta logica
+en vez de duplicarla en cada extractor.
 """
 
 import requests

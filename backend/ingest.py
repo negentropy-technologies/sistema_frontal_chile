@@ -25,11 +25,10 @@ from types import GeneratorType
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import rasterio
 from sqlalchemy import text
 
 from db import app_role_config, get_engine, upsert
-from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dga, dmc, gee, nasa_imerg, sentinel1
+from extractors import agromet, anomaly_raster, chirps, chirps_climatology, dem, dga, dmc, gee, nasa_imerg
 from extractors._raster import save_png_overlay
 from logutil import log
 
@@ -154,20 +153,30 @@ ANOMALY_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "frames" / 
 
 def _fetch_anomaly(start: datetime, end: datetime, engine) -> list[dict]:
     """
-    Anomalia diaria de precipitacion: ajuste de residuos IDW
-    (Ossa-Moreno et al. 2019, ver anomaly.py) entre las estaciones ya
-    ingeridas (dga/dmc/agromet) y el CHIRPS prelim del dia (ya en
-    disco, ver extractors/chirps.py), menos la climatologia historica
-    CHIRPS del mismo dia-del-anio (ver extractors/chirps_climatology.py).
-    Climatologia y CHIRPS prelim comparten el mismo bbox y la misma
-    resolucion nativa CHIRPS v3 (0.05 grados), por eso sus grillas
-    calzan pixel a pixel sin reproyectar.
+    Anomalia DIARIA de precipitacion: el residuo estacion-CHIRPS se
+    ajusta a resolucion de BLOQUE (Ossa-Moreno et al. 2019, Eq. 9,
+    bloques de a lo mas ~31 dias rodantes desde "start", ver
+    anomaly_raster.bucket_dias) pero el resultado se desagrega a un
+    mapa por dia segun la forma real de CHIRPS dentro del bloque
+    (anomaly.py::compute_anomaly_windowed), con umbral de lluvia
+    espuria en pixeles secos y, si el DEM esta disponible, un ajuste
+    liviano por gradiente altitudinal (elevation_trend: CHIRPS
+    subestima precipitacion orografica y el IDW puro no tiene nocion
+    de altura, ver extractors/anomaly_raster.py). La climatologia se
+    compara dia exacto contra dia exacto (no agregada).
 
-    Se salta un dia si: no hay ninguna estacion con dato ese dia (no
-    tiene sentido interpolar con cero puntos), si el CHIRPS prelim de
-    ese dia todavia no esta en disco (latencia de ~1 semana del CHC,
-    lo recoge una corrida siguiente), o si ninguna estacion cae dentro
+    Se salta un bloque si no hay ninguna estacion con dato en esos
+    dias, o si ningun dia del bloque tiene CHIRPS prelim en disco
+    todavia. Dentro de un bloque, se salta un dia puntual si su CHIRPS
+    prelim (recien publicado, latencia ~1 semana del CHC) o su
+    climatologia no estan en disco, o si ninguna estacion cae dentro
     de la grilla de fondo. Nada de esto es un error del pipeline.
+
+    El DEM (extractors/dem.py) se descarga UNA VEZ por corrida (cache
+    indefinido en disco, no por fecha); si Earth Engine no responde la
+    anomalia se sigue calculando igual, solo sin el ajuste de
+    elevacion (se registra en el log, no se aborta la fuente completa
+    por esto).
 
     La climatologia se descarga (y cachea en disco, igual que el resto
     de los extractores) la primera vez que se pide un dia-del-anio: en
@@ -180,64 +189,95 @@ def _fetch_anomaly(start: datetime, end: datetime, engine) -> list[dict]:
     with engine.connect() as conn:
         filas = conn.execute(text(ANOMALIA_ESTACIONES_SQL), {"start": start, "end": end}).fetchall()
 
-    por_dia = defaultdict(list)
+    valores_por_dia = defaultdict(dict)  # date -> {(lon, lat): [valores diarios]}
     for dia, lon, lat, valor in filas:
-        por_dia[dia].append(((lon, lat), valor))
+        valores_por_dia[dia].setdefault((lon, lat), []).append(valor)
 
-    if not por_dia:
+    if not valores_por_dia:
         log("chirps_anomaly: sin estaciones con dato en la ventana, se salta")
         return []
 
+    try:
+        dem_path = dem.fetch_elevation(REGION_BBOX)
+    except Exception as exc:
+        log(f"chirps_anomaly: DEM no disponible ({exc}), se sigue sin ajuste de elevacion")
+        dem_path = None
+
     rows = []
-    for dia in sorted(por_dia):
-        valid_time = datetime(dia.year, dia.month, dia.day, tzinfo=timezone.utc)
-        chirps_tif = chirps.DATA_DIR / "chirps_precipitation" / f"{valid_time:%Y%m%dT000000}.tif"
-        if not chirps_tif.exists():
-            log(f"chirps_anomaly {dia}: sin CHIRPS prelim en disco todavia, se salta")
+    for bucket in anomaly_raster.bucket_dias(start, end):
+        etiqueta = f"{bucket[0]:%Y-%m-%d} a {bucket[-1]:%Y-%m-%d}"
+        estaciones_bucket = defaultdict(list)  # coord -> [total diario, uno por dia del bloque]
+        for dia in bucket:
+            for coord, vals in valores_por_dia.get(dia.date(), {}).items():
+                estaciones_bucket[coord].append(sum(vals))
+        if not estaciones_bucket:
+            log(f"chirps_anomaly {etiqueta}: sin estaciones con dato, se salta")
             continue
-
-        with rasterio.open(chirps_tif) as src:
-            background_grid = src.read(1).astype("float64")
-            profile = src.profile.copy()
-            transform = src.transform
 
         try:
-            climatology_grid, _ = chirps_climatology.climatology_for_dayofyear(REGION_BBOX, dia.month, dia.day)
+            background_window_grid, transform, profile, dias_usados = anomaly_raster.background_mensual(bucket, REGION_BBOX)
         except ValueError as exc:
-            log(f"chirps_anomaly {dia}: sin climatologia -> {exc}")
+            log(f"chirps_anomaly {etiqueta}: {exc}")
             continue
 
-        if climatology_grid.shape != background_grid.shape:
-            log(f"chirps_anomaly {dia}: climatologia {climatology_grid.shape} no calza con "
-                f"CHIRPS prelim {background_grid.shape}, se salta")
-            continue
+        coords = list(estaciones_bucket.keys())
+        totales_ventana = [sum(vs) for vs in estaciones_bucket.values()]
 
-        coords = [c for c, _ in por_dia[dia]]
-        valores = [v for _, v in por_dia[dia]]
-        try:
-            anomaly_grid = anomaly_raster.compute_anomaly_grid(
-                coords, valores, background_grid, transform, climatology_grid,
-            )
-        except ValueError as exc:
-            log(f"chirps_anomaly {dia}: {exc}")
-            continue
+        elevation_grid = station_elevations = None
+        if dem_path is not None:
+            try:
+                elevation_grid = anomaly_raster.elevation_grid_for(dem_path, transform, background_window_grid.shape)
+                station_elevations = [
+                    anomaly_raster.sample_at_point(elevation_grid, transform, lon, lat) or 0.0
+                    for lon, lat in coords
+                ]
+            except Exception as exc:
+                log(f"chirps_anomaly {etiqueta}: elevacion no disponible ({exc}), sin ajuste de elevacion")
+                elevation_grid = station_elevations = None
 
-        tif_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.tif"
-        png_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.png"
-        anomaly_raster.write_geotiff(anomaly_grid, profile, tif_path)
-        save_png_overlay(tif_path, png_path)
-        log(f"chirps_anomaly {dia}: {len(coords)} estaciones, grilla {anomaly_grid.shape}")
+        for dia in dias_usados:
+            diario = anomaly_raster.background_dia(dia, REGION_BBOX)
+            if diario is None:
+                continue
+            background_daily_grid, _, _ = diario
 
-        rows.append({
-            "source": "chirps_anomaly",
-            "variable": "chirps_precip_anomaly",
-            "region": "centro_sur",
-            "valid_time": valid_time,
-            "bbox": list(REGION_BBOX),
-            "file_path": str(tif_path),
-            "png_overlay_path": str(png_path),
-            "created_at": datetime.now(timezone.utc),
-        })
+            try:
+                climatology_daily_grid, _ = anomaly_raster.climatologia_dia(dia.month, dia.day, REGION_BBOX)
+            except ValueError as exc:
+                log(f"chirps_anomaly {dia}: sin climatologia -> {exc}")
+                continue
+            if climatology_daily_grid.shape != background_window_grid.shape:
+                log(f"chirps_anomaly {dia}: climatologia {climatology_daily_grid.shape} no calza con "
+                    f"CHIRPS prelim {background_window_grid.shape}, se salta")
+                continue
+
+            try:
+                anomaly_grid = anomaly_raster.compute_anomaly_grid_windowed(
+                    coords, totales_ventana, background_window_grid, transform,
+                    background_daily_grid, climatology_daily_grid,
+                    station_elevations=station_elevations, elevation_grid=elevation_grid,
+                )
+            except ValueError as exc:
+                log(f"chirps_anomaly {dia}: {exc}")
+                continue
+
+            valid_time = dia
+            tif_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.tif"
+            png_path = ANOMALY_DATA_DIR / f"{valid_time:%Y%m%dT000000}.png"
+            anomaly_raster.write_geotiff(anomaly_grid, profile, tif_path)
+            save_png_overlay(tif_path, png_path)
+            log(f"chirps_anomaly {dia} (bloque {etiqueta}): {len(coords)} estaciones, grilla {anomaly_grid.shape}")
+
+            rows.append({
+                "source": "chirps_anomaly",
+                "variable": "chirps_precip_anomaly",
+                "region": "centro_sur",
+                "valid_time": valid_time,
+                "bbox": list(REGION_BBOX),
+                "file_path": str(tif_path),
+                "png_overlay_path": str(png_path),
+                "created_at": datetime.now(timezone.utc),
+            })
     return rows
 
 
@@ -324,36 +364,6 @@ SOURCES = [
         ["source", "variable", "region", "valid_time"],
         None,
     ),
-    (
-        # sentinel1 no usa REGION_BBOX: se filtra por el poligono real
-        # de UNA region (dpa_limites.dpa_region_subdere), pasada por
-        # --s1-region, porque cada escena pesa ~1-2 GB y bajar todo el
-        # bbox del proyecto no tiene sentido. A diferencia de las
-        # demas fuentes, no escribe nada en la BD (ver
-        # extractors/sentinel1.fetch_batches): solo descarga y
-        # descomprime en disco, para un script de procesamiento
-        # aparte. table/conflict_cols/geom_cols quedan aqui solo para
-        # calzar con la forma de la tupla; nunca se usan porque
-        # fetch_batches siempre devuelve una lista vacia. El fetch_fn
-        # de aqui es un placeholder que falla explicito: run() lo
-        # reemplaza por un closure con --s1-region/--s1-pass/
-        # --s1-plataformas/--s1-tipo apenas "sentinel1" este en la
-        # seleccion de fuentes (ver el bloque de wiring en run(),
-        # mismo mecanismo que ya usan resume_after/workers para
-        # dga/dmc/agromet).
-        "sentinel1",
-        lambda start, end, engine: (_ for _ in ()).throw(
-            RuntimeError("sentinel1 deberia haber sido reemplazado por run(), ver bloque de wiring")),
-        "frontal_sur.frames_raster",
-        ["source", "variable", "region", "valid_time"],
-        None,
-    ),
-    # flood_hub queda fuera de SOURCES: ver "Flood Hub, diferido a un
-    # plan separado" en el plan de implementacion. Cuando llegue el
-    # acceso, agregar aqui una entrada igual a las demas (funcion
-    # fetch, tabla frontal_sur.flood_status,
-    # conflict_cols=["gauge_id", "issued_time"],
-    # geom_cols={"geom_point": 4326}).
 ]
 
 
@@ -449,53 +459,8 @@ def parse_date(raw: str) -> datetime:
         raise ValueError(f"la fecha debe ser YYYY-MM-DD, se recibio {raw!r}")
 
 
-def parse_s1_pass(raw: str | None) -> str | None:
-    """
-    Valida --s1-pass contra las dos direcciones de orbita reales de
-    Sentinel-1 (ver extractors/sentinel1.ORBITAS_VALIDAS). None (flag
-    no pasado) trae ambas direcciones, es un valor valido a proposito.
-    """
-    if raw is None:
-        return None
-    valor = raw.strip().upper()
-    if valor not in sentinel1.ORBITAS_VALIDAS:
-        raise ValueError(f"--s1-pass debe ser {sorted(sentinel1.ORBITAS_VALIDAS)}, se recibio {raw!r}")
-    return valor
-
-
-def parse_s1_plataformas(raw: str | None) -> set[str] | None:
-    """
-    Valida --s1-plataformas (letras separadas por coma, ej "C,D")
-    contra las plataformas reales de la constelacion Sentinel-1 (ver
-    extractors/sentinel1.PLATAFORMAS_VALIDAS). S1B esta fuera de
-    servicio desde 2021 pero se acepta igual por si se pide historico.
-    None (flag no pasado) trae todas.
-    """
-    if raw is None:
-        return None
-    plataformas = {letra.strip().upper() for letra in raw.split(",") if letra.strip()}
-    desconocidas = plataformas - sentinel1.PLATAFORMAS_VALIDAS
-    if desconocidas:
-        raise ValueError(f"--s1-plataformas invalidas: {sorted(desconocidas)}; validas: {sorted(sentinel1.PLATAFORMAS_VALIDAS)}")
-    return plataformas
-
-
-def parse_s1_tipo(raw: str) -> str:
-    """
-    Valida --s1-tipo contra los dos productos nivel 1 de Sentinel-1:
-    GRD (backscatter, el default para change detection por
-    intensidad) y SLC (amplitud+fase, para InSAR).
-    """
-    valor = raw.strip().upper()
-    if valor not in sentinel1.TIPOS_VALIDOS:
-        raise ValueError(f"--s1-tipo debe ser {sorted(sentinel1.TIPOS_VALIDOS)}, se recibio {raw!r}")
-    return valor
-
-
 def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None = None,
-        resume_after: str | None = None, workers: int = 1,
-        s1_region: str | None = None, s1_pass: str | None = None,
-        s1_plataformas: set[str] | None = None, s1_tipo: str = "GRD") -> None:
+        resume_after: str | None = None, workers: int = 1) -> None:
     """
     Abre un unico tunel SSH (reutilizado para todas las fuentes) y
     corre cada fuente de SOURCES en su propio try/except, registrando
@@ -522,24 +487,6 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
     dgasat devuelve 500 en el 100% de los casos (no probado a esa
     escala en dmc/agromet, no subir de 4 sin volver a probar en vivo).
 
-    s1_region/s1_pass/s1_plataformas/s1_tipo solo aplican a la fuente
-    sentinel1 (ver extractors/sentinel1.fetch_batches): a diferencia
-    del resto, esta fuente no corre sola con la ventana [start, end],
-    necesita ademas la region (nombre real de
-    dpa_limites.dpa_region_subdere) porque cada escena pesa ~1-2 GB.
-    s1_region es obligatorio si "sentinel1" esta en la seleccion de
-    fuentes; el resto son opcionales (None/default trae todo). Esta
-    fuente tampoco escribe nada en la BD (fetch_batches siempre
-    devuelve una lista vacia): solo deja las escenas descomprimidas en
-    disco para que un script de procesamiento aparte las use. A
-    diferencia de las demas fuentes (donde dry_run solo salta el
-    upsert y el fetch igual corre completo), sentinel1 SI respeta
-    dry_run dentro de su propio fetch_batches y no descarga nada: su
-    efecto secundario es bajar 1-2 GB por escena, muy caro para el
-    criterio "liviano" que asume el dry-run del resto del pipeline
-    (ver el incidente del 2026-07-21: un --dry-run sin este flag
-    alcanzo a bajar y descomprimir una escena completa antes de poder
-    cortarlo a mano).
     """
     config = app_role_config()
 
@@ -570,24 +517,6 @@ def run(start: datetime, end: datetime, dry_run: bool, sources: list[str] | None
 
         seleccion = [
             (name, _con_resume_y_workers(name, fetch_fn), table, conflict_cols, geom_cols)
-            for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
-        ]
-
-    if any(name == "sentinel1" for name, *_ in seleccion):
-        # Se valida aca (antes de abrir el tunel) para no gastar una
-        # conexion SSH si falta el parametro obligatorio: mismo
-        # criterio que parse_workers/parse_date, fallar rapido con un
-        # mensaje claro en vez de que sentinel1 reviente mas abajo con
-        # el RuntimeError generico del placeholder en SOURCES.
-        if s1_region is None:
-            raise ValueError("--sources sentinel1 necesita --s1-region (nombre de dpa_limites.dpa_region_subdere)")
-        seleccion = [
-            (name,
-             (lambda s, e, en: sentinel1.fetch_batches(
-                 s, e, s1_region, en, orbit_pass=s1_pass, plataformas=s1_plataformas,
-                 producto_tipo=s1_tipo, dry_run=dry_run))
-             if name == "sentinel1" else fetch_fn,
-             table, conflict_cols, geom_cols)
             for name, fetch_fn, table, conflict_cols, geom_cols in seleccion
         ]
 
@@ -663,10 +592,6 @@ def main() -> None:
     parser.add_argument("--resume-after", default=None, help="codigo de la ultima estacion confirmada upserteada en el log (cod_bna/cod_estacion segun la fuente); retoma el catalogo despues de esa estacion (usar junto con --sources dga|dmc|agromet)")
     parser.add_argument("--workers", default="1", help=f"estaciones scrapeadas en simultaneo (dga/dmc/agromet), entre 1 y {MAX_SOURCE_WORKERS} (verificado en vivo el 2026-07-19 en las tres fuentes; con 10 dgasat devuelve 500 en el 100%% de los casos; default: 1, secuencial)")
     parser.add_argument("--status", action="store_true", help="solo reporta hasta que fecha hay datos por fuente (BD y disco) y la ultima corrida registrada; no ingesta nada")
-    parser.add_argument("--s1-region", default=None, help="nombre de region en dpa_limites.dpa_region_subdere (ej: Coquimbo); obligatorio con --sources sentinel1")
-    parser.add_argument("--s1-pass", default=None, help="ASCENDING o DESCENDING; default: ambas orbitas (solo aplica a --sources sentinel1)")
-    parser.add_argument("--s1-plataformas", default=None, help="letras de plataforma separadas por coma, ej: C,D; default: todas (A/B/C/D; solo aplica a --sources sentinel1)")
-    parser.add_argument("--s1-tipo", default="GRD", help="GRD (backscatter, default) o SLC (amplitud+fase, InSAR); solo aplica a --sources sentinel1")
     args = parser.parse_args()
 
     if args.status:
@@ -691,12 +616,8 @@ def main() -> None:
 
     sources = args.sources.split(",") if args.sources else None
     workers = parse_workers(args.workers)
-    s1_pass = parse_s1_pass(args.s1_pass)
-    s1_plataformas = parse_s1_plataformas(args.s1_plataformas)
-    s1_tipo = parse_s1_tipo(args.s1_tipo)
     run(start=start, end=end, dry_run=args.dry_run, sources=sources,
-        resume_after=args.resume_after, workers=workers,
-        s1_region=args.s1_region, s1_pass=s1_pass, s1_plataformas=s1_plataformas, s1_tipo=s1_tipo)
+        resume_after=args.resume_after, workers=workers)
 
 
 if __name__ == "__main__":

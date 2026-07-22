@@ -14,7 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from anomaly import apply_dry_threshold, compute_anomaly, compute_anomaly_windowed, idw_residuals
+from anomaly import apply_dry_threshold, compute_anomaly, compute_anomaly_windowed, elevation_trend, idw_residuals
 
 
 def test_idw_residuals_en_la_estacion_misma_devuelve_su_propio_residuo():
@@ -126,6 +126,47 @@ def test_apply_dry_threshold_fuerza_a_cero_bajo_el_umbral():
     assert result == [0.0, 0.0, 1.0, 5.0]
 
 
+def test_elevation_trend_ajusta_pendiente_lineal():
+    # Residuos que siguen EXACTO una recta residuo = 0.1 * elevacion.
+    pendiente, intercepto = elevation_trend([0.0, 10.0, 20.0], [0.0, 100.0, 200.0])
+    assert abs(pendiente - 0.1) < 1e-9
+    assert abs(intercepto) < 1e-9
+
+
+def test_elevation_trend_sin_informacion_suficiente_devuelve_pendiente_cero():
+    # Una sola estacion: no hay como estimar una pendiente.
+    pendiente, intercepto = elevation_trend([5.0], [100.0])
+    assert pendiente == 0.0
+    assert intercepto == 5.0
+    # Elevacion constante entre estaciones: tampoco hay pendiente que
+    # estimar (division por cero en el ajuste si se intentara).
+    pendiente, intercepto = elevation_trend([5.0, -3.0], [100.0, 100.0])
+    assert pendiente == 0.0
+    assert intercepto == 1.0
+
+
+def test_compute_anomaly_windowed_elevacion_agrega_tendencia_a_la_grilla():
+    # 2 estaciones cuyos residuos (obs - fondo) caen EXACTO sobre la
+    # recta residuo = 0.1 * elevacion (0.0 a elevacion 0, 10.0 a
+    # elevacion 100): una vez destendenciados por elevacion, el
+    # residuo IDW-interpolable es 0 en las dos, asi que TODA la senal
+    # en el punto de grilla viene de la tendencia de elevacion, no de
+    # un residuo de estacion "prestado" por cercania horizontal.
+    result = compute_anomaly_windowed(
+        station_window_totals=[100.0, 100.0],
+        background_window_at_stations=[100.0, 90.0],  # residuos: 0.0 y 10.0
+        background_window_grid=[100.0],
+        background_daily_grid=[100.0],  # igual al de ventana: sin desagregar (razon 1)
+        station_coords=[(0.0, 0.0), (10.0, 0.0)],
+        grid_coords=[(5.0, 0.0)],
+        station_elevations=[0.0, 100.0],
+        elevation_grid=[50.0],  # elevacion del punto de grilla: recta predice residuo 5.0
+    )
+    # window_corrected = 0.0 (idw del residuo sin tendencia) + 5.0
+    # (tendencia en la grilla) + 100.0 (fondo) = 105.0.
+    assert abs(result[0] - 105.0) < 1e-9
+
+
 if __name__ == "__main__":
     test_idw_residuals_en_la_estacion_misma_devuelve_su_propio_residuo()
     test_idw_residuals_punto_medio_es_promedio_simple()
@@ -136,4 +177,7 @@ if __name__ == "__main__":
     test_compute_anomaly_windowed_desagrega_proporcional_al_chirps_diario()
     test_compute_anomaly_windowed_ventana_seca_da_cero()
     test_apply_dry_threshold_fuerza_a_cero_bajo_el_umbral()
+    test_elevation_trend_ajusta_pendiente_lineal()
+    test_elevation_trend_sin_informacion_suficiente_devuelve_pendiente_cero()
+    test_compute_anomaly_windowed_elevacion_agrega_tendencia_a_la_grilla()
     print("OK: todos los tests de anomaly pasaron")

@@ -27,12 +27,10 @@ from pathlib import Path
 import ee
 import numpy as np
 import rasterio
-import requests
 from PIL import Image
 
 from db import load_config
-from extractors._raster import save_png_overlay
-from extractors._retry import retry
+from extractors._raster import download_geotiff, save_png_overlay
 from logutil import log
 
 GOES_COLLECTION = "NOAA/GOES/19/MCMIPF"
@@ -123,33 +121,6 @@ def _scaled(image: "ee.Image", bands: list[str]) -> "ee.Image":
     # descarga duplica su tamano, superando el limite de 48 MB de GEE
     # con el bbox ancho; float32 sobra para reflectancias y Kelvin.
     return ee.Image.cat(scaled).rename(bands).toFloat()
-
-
-@retry(times=3, backoff_seconds=2.0, exceptions=(ee.EEException, requests.RequestException))
-def _download_geotiff(image: "ee.Image", region: "ee.Geometry", dest_path: Path, scale: int) -> None:
-    """
-    Pide a Earth Engine la URL de descarga de "image" recortada a
-    "region" en formato GeoTIFF, y la descarga a dest_path. Envuelta
-    en el decorador de reintentos: tanto la llamada a getDownloadURL
-    (EEException si el token expiro y no se refresco a tiempo) como la
-    descarga HTTP (RequestException) pueden fallar transitoriamente.
-
-    Se fuerza crs EPSG:4326 porque la proyeccion nativa de GOES es
-    geoestacionaria y el escritor de GeoTIFF de Earth Engine no la
-    soporta (400 INVALID_ARGUMENT "Unable to write GeoTIFFs in
-    projection", verificado en vivo); ademas deja los rasters ya en la
-    misma proyeccion que usara el mapa web.
-    """
-    url = image.getDownloadURL({
-        "region": region,
-        "scale": scale,
-        "crs": "EPSG:4326",
-        "format": "GEO_TIFF",
-    })
-    response = requests.get(url, timeout=120)
-    response.raise_for_status()
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    dest_path.write_bytes(response.content)
 
 
 def _save_geocolor_overlay(tif_path: Path, png_path: Path) -> None:
@@ -271,7 +242,7 @@ def fetch_frames(start: datetime, end: datetime, bbox: tuple) -> list[dict]:
                 # Chile la resolucion efectiva de GOES-East ya es >3 km
                 # por el angulo de vista, asi que no se pierde detalle
                 # real.
-                _download_geotiff(_scaled(image, bands), region, tif_path, scale=3000)
+                download_geotiff(_scaled(image, bands), region, tif_path, scale=3000)
                 log(f"goes {variable} {stamp}: descargado")
             else:
                 log(f"goes {variable} {stamp}: ya existia en disco")

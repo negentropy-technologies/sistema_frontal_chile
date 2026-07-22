@@ -39,13 +39,25 @@ otros modulos):
   extractors/chirps_climatology.py.
 - Punto 3 (periodo base alternativo 1991-2020 / dual): requiere CHIRPS
   1991-1997, no extraido.
-- Punto 5 (covariable de elevacion / KED): requiere DEM, no extraido;
-  escribir la formula sin datos reales para validarla es prematuro.
 - Puntos 6-9 (metadatos de incertidumbre, mascara de Valparaiso, SPI,
   advertencias regionales): extractors/anomaly_raster.py o capa de
   presentacion, no calculo de residuos.
 - Punto 10 (sustitucion CHIRPS/IMERG en ventana de rezago): pipeline de
   ingesta, no este archivo.
+
+Punto 5 (covariable de elevacion), version LIVIANA implementada el
+2026-07-22 (`elevation_trend` + los parametros opcionales de
+`compute_anomaly_windowed`): CHIRPS tiene sesgo documentado en terreno
+complejo/orografico (subestima precipitacion por las limitaciones del
+sensor infrarrojo en zonas de lluvia orografica) y el IDW de residuos
+no tiene ninguna nocion de altura, asi que en un dominio con fuerte
+gradiente costa-cordillera (ej. Coquimbo) el campo corregido salia sin
+estructura orografica -- verificado en vivo el 2026-07-22 con un plot
+real que el usuario califico de "nefasto". La version completa (DEM +
+regresion con mas covariables + KRIGING de los residuos de esa
+regresion) sigue pospuesta como v2 (ver plan): esto es solo una
+regresion lineal residuo~elevacion para destendenciar antes del IDW,
+sin la covarianza espacial del kriging real.
 """
 
 import numpy as np
@@ -119,6 +131,27 @@ def compute_anomaly(
     return (np.asarray(interpolated) + np.asarray(background_grid)).tolist()
 
 
+def elevation_trend(residuals: list[float], elevations: list[float]) -> tuple[float, float]:
+    """
+    Ajuste lineal residuo ~ elevacion por minimos cuadrados (grado 1,
+    numpy.polyfit): la "version liviana" del gradiente altitudinal
+    (ver el docstring del modulo, Punto 5). Devuelve (pendiente,
+    intercepto) para restar la tendencia de elevacion de los residuos
+    ANTES del IDW y volver a sumarla en la grilla completa despues --
+    kriging with external drift simplificado, sin la covarianza
+    espacial del kriging real (eso es lo que queda pospuesto para v2).
+    Con menos de 2 estaciones o elevacion constante entre ellas no hay
+    informacion para estimar un gradiente: pendiente 0, intercepto el
+    promedio de los residuos (o 0.0 si no hay residuos).
+    """
+    if len(residuals) < 2 or np.ptp(np.asarray(elevations, dtype=np.float64)) == 0:
+        return 0.0, float(np.mean(residuals)) if residuals else 0.0
+    pendiente, intercepto = np.polyfit(
+        np.asarray(elevations, dtype=np.float64), np.asarray(residuals, dtype=np.float64), 1,
+    )
+    return float(pendiente), float(intercepto)
+
+
 def compute_anomaly_windowed(
     station_window_totals: list[float],
     background_window_at_stations: list[float],
@@ -127,6 +160,8 @@ def compute_anomaly_windowed(
     station_coords: list[tuple[float, float]],
     grid_coords: list[tuple[float, float]],
     batch_size: int = DEFAULT_BATCH_SIZE,
+    station_elevations: list[float] | None = None,
+    elevation_grid: list[float] | None = None,
 ) -> list[float]:
     """
     Punto 1 (prioridad alta) del prompt maestro de ajuste
@@ -138,15 +173,30 @@ def compute_anomaly_windowed(
     pixel: la forma diaria la sigue dando CHIRPS, solo el sesgo se
     corrige a la resolucion en que el metodo esta validado.
 
+    Si "station_elevations"/"elevation_grid" se dan (Punto 5, version
+    liviana), el residuo de ventana se destendencia por elevacion
+    (elevation_trend) ANTES del IDW, y la tendencia se vuelve a sumar
+    en toda la grilla despues: sin esto, el IDW puro extrapola el
+    residuo de estaciones bajas (costa/valle) sin ningun cambio hacia
+    zonas altas (cordillera) kilometros mas lejos, borrando cualquier
+    gradiente costa-cordillera real.
+
     Si el fondo de la ventana es 0 en un pixel (CHIRPS no vio lluvia en
     los 30 dias), no hay forma diaria de la cual repartir el ajuste y
     el resultado se fuerza a 0 en ese pixel.
     """
-    window_residuals = (
-        np.asarray(station_window_totals) - np.asarray(background_window_at_stations)
-    ).tolist()
-    interpolated = idw_residuals(station_coords, window_residuals, grid_coords, batch_size=batch_size)
-    window_corrected = np.asarray(interpolated) + np.asarray(background_window_grid)
+    window_residuals = np.asarray(station_window_totals) - np.asarray(background_window_at_stations)
+
+    if station_elevations is not None and elevation_grid is not None:
+        pendiente, intercepto = elevation_trend(window_residuals.tolist(), station_elevations)
+        tendencia_estaciones = pendiente * np.asarray(station_elevations, dtype=np.float64) + intercepto
+        residuos_a_interpolar = (window_residuals - tendencia_estaciones).tolist()
+        interpolated = idw_residuals(station_coords, residuos_a_interpolar, grid_coords, batch_size=batch_size)
+        tendencia_grilla = pendiente * np.asarray(elevation_grid, dtype=np.float64) + intercepto
+        window_corrected = np.asarray(interpolated) + tendencia_grilla + np.asarray(background_window_grid)
+    else:
+        interpolated = idw_residuals(station_coords, window_residuals.tolist(), grid_coords, batch_size=batch_size)
+        window_corrected = np.asarray(interpolated) + np.asarray(background_window_grid)
 
     window_background = np.asarray(background_window_grid)
     shape = np.divide(
